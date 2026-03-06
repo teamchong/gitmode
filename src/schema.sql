@@ -1,47 +1,44 @@
--- gitmode D1 schema — metadata, commit index, permissions, SSH keys
+-- gitmode per-repo DO SQLite schema
+-- Each RepoStore Durable Object instance creates these tables
+-- in its embedded SQLite database on first access.
 
-CREATE TABLE IF NOT EXISTS repos (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+-- Git refs (branches, tags)
+CREATE TABLE IF NOT EXISTS refs (
+  name TEXT PRIMARY KEY,
+  sha TEXT NOT NULL
+);
+
+-- HEAD (symbolic ref, e.g. "ref: refs/heads/main")
+CREATE TABLE IF NOT EXISTS head (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  value TEXT NOT NULL
+);
+
+-- Repo metadata (one row per DO instance)
+CREATE TABLE IF NOT EXISTS repo_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   description TEXT DEFAULT '',
-  visibility TEXT DEFAULT 'public' CHECK (visibility IN ('public', 'private')),
+  visibility TEXT DEFAULT 'public',
   default_branch TEXT DEFAULT 'main',
   created_at TEXT NOT NULL,
-  updated_at TEXT,
-  UNIQUE(owner, name)
+  updated_at TEXT
 );
 
+-- Commit index (for log, search, API)
 CREATE TABLE IF NOT EXISTS commits (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  repo TEXT NOT NULL,
-  sha1 TEXT NOT NULL,
+  sha TEXT PRIMARY KEY,
   author TEXT NOT NULL,
   message TEXT NOT NULL,
-  timestamp INTEGER NOT NULL,
-  UNIQUE(repo, sha1)
+  timestamp INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_commits_repo ON commits(repo, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(repo, author);
+CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author);
 
-CREATE TABLE IF NOT EXISTS ssh_keys (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner TEXT NOT NULL,
-  title TEXT NOT NULL,
-  fingerprint TEXT NOT NULL UNIQUE,
-  public_key TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ssh_keys_fingerprint ON ssh_keys(fingerprint);
-
+-- Access permissions
 CREATE TABLE IF NOT EXISTS permissions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  repo TEXT NOT NULL,
-  username TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('read', 'write', 'admin')),
-  UNIQUE(repo, username)
+  username TEXT PRIMARY KEY,
+  role TEXT NOT NULL CHECK (role IN ('read', 'write', 'admin'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_permissions_repo ON permissions(repo);

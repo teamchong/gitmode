@@ -13,7 +13,7 @@
     "test:zig": "cd wasm && zig build test",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:init": "wrangler d1 execute gitmode-meta --file=src/schema.sql"
+    "test:conformance": "bash test/conformance.sh"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.20",

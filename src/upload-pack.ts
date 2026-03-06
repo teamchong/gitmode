@@ -73,9 +73,9 @@ export async function handleUploadPack(
   // Response: NAK + packfile wrapped in sideband-64k
   const nak = encodePktLine("NAK\n");
 
-  // Split packfile into sideband pkt-lines (max 65519 bytes payload per pkt-line:
-  // 65535 max pkt-line - 4 length - 1 channel byte = 65530 data bytes)
-  const MAX_SIDEBAND_DATA = 65519;
+  // Split packfile into sideband pkt-lines
+  // Git LARGE_PACKET_MAX = 65520 total, minus 4 header, minus 1 channel byte = 65515
+  const MAX_SIDEBAND_DATA = 65515;
   const sidebandPkts: Uint8Array[] = [];
   let packOffset = 0;
   while (packOffset < packData.length) {

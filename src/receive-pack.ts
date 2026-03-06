@@ -37,9 +37,10 @@ export async function handleReceivePack(
   env?: Env,
   repoPath?: string
 ): Promise<Response> {
-  // Parse ref update commands
+  // Parse ref update commands and capabilities
   const updates: RefUpdate[] = [];
   let offset = 0;
+  let useSideband = false;
 
   while (offset < body.length) {
     const pkt = decodePktLine(body, offset);
@@ -50,9 +51,13 @@ export async function handleReceivePack(
     if (pkt.type !== "data" || !pkt.payload) continue;
 
     let line = decoder.decode(pkt.payload).trimEnd();
-    // Strip capabilities from first line
+    // Parse capabilities from first line
     const nullIdx = line.indexOf("\0");
-    if (nullIdx !== -1) line = line.slice(0, nullIdx);
+    if (nullIdx !== -1) {
+      const caps = line.slice(nullIdx + 1);
+      if (caps.includes("side-band-64k")) useSideband = true;
+      line = line.slice(0, nullIdx);
+    }
 
     if (line.length >= 85) {
       updates.push({
@@ -77,26 +82,26 @@ export async function handleReceivePack(
     try {
       if (update.newSha === ZERO_SHA) {
         // Delete ref
-        await engine.deleteRef(update.refname.replace(/^refs\//, ""));
+        engine.deleteRef(update.refname.replace(/^refs\//, ""));
         results.push(`ok ${update.refname}`);
       } else {
         // Verify old SHA matches (fast-forward check)
         const currentRef = update.refname.replace(/^refs\//, "");
-        const currentSha = await engine.getRef(currentRef);
+        const currentSha = engine.getRef(currentRef);
 
         if (update.oldSha !== ZERO_SHA && currentSha !== update.oldSha) {
           results.push(`ng ${update.refname} non-fast-forward`);
           continue;
         }
 
-        await engine.setRef(currentRef, update.newSha);
+        engine.setRef(currentRef, update.newSha);
 
         // Update HEAD for first push
         if (
           update.refname === "refs/heads/main" ||
           update.refname === "refs/heads/master"
         ) {
-          await engine.setHead(`ref: ${update.refname}`);
+          engine.setHead(`ref: ${update.refname}`);
         }
 
         results.push(`ok ${update.refname}`);
@@ -139,11 +144,15 @@ export async function handleReceivePack(
     rpos += part.length;
   }
 
-  // Wrap the report-status in sideband channel 1 and terminate with flush
-  const sidebandPkt = wrapSideband(reportBuf);
-  const responseBody = new Uint8Array(sidebandPkt.length + FLUSH_PKT.length);
-  responseBody.set(sidebandPkt);
-  responseBody.set(FLUSH_PKT, sidebandPkt.length);
+  let responseBody: Uint8Array;
+  if (useSideband) {
+    const sidebandPkt = wrapSideband(reportBuf);
+    responseBody = new Uint8Array(sidebandPkt.length + FLUSH_PKT.length);
+    responseBody.set(sidebandPkt);
+    responseBody.set(FLUSH_PKT, sidebandPkt.length);
+  } else {
+    responseBody = reportBuf;
+  }
 
   return new Response(responseBody, {
     headers: {

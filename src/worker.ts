@@ -7,17 +7,15 @@
 //   POST /:owner/:repo.git/git-receive-pack                    → push
 //   GET  /:owner/:repo.git/HEAD                                → default branch
 //
-// SSH: via TCP socket handler (Cloudflare Workers TCP support)
+// All git operations are routed through a per-repo RepoStore Durable Object
+// which owns the repo's SQLite database (refs, metadata) and coordinates
+// atomic ref updates.
 
-import { GitEngine } from "./git-engine";
-import { handleUploadPack } from "./upload-pack";
-import { handleReceivePack } from "./receive-pack";
-import { handleInfoRefs } from "./info-refs";
-import { RepoLock } from "./repo-lock";
+import type { Env } from "./env";
+import { RepoStore } from "./repo-store";
 
-export { RepoLock };
-
-export type { Env } from "./env";
+export { RepoStore };
+export type { Env };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -34,7 +32,10 @@ export default {
 
     const [, owner, repo, action] = match;
     const repoPath = `${owner}/${repo}`;
-    const engine = new GitEngine(env, repoPath);
+
+    // Get per-repo Durable Object
+    const storeId = env.REPO_STORE.idFromName(repoPath);
+    const store = env.REPO_STORE.get(storeId);
 
     try {
       // GET /info/refs?service=...
@@ -46,26 +47,40 @@ export default {
         ) {
           return new Response("Unsupported service\n", { status: 403 });
         }
-        return handleInfoRefs(engine, service);
+        return store.fetch(
+          new Request(request.url, {
+            method: "GET",
+            headers: {
+              "x-action": "info-refs",
+              "x-repo-path": repoPath,
+              "x-service": service,
+            },
+          })
+        );
       }
 
       // POST /git-upload-pack (clone/fetch)
       if (action === "git-upload-pack" && request.method === "POST") {
-        const body = new Uint8Array(await request.arrayBuffer());
-        return handleUploadPack(engine, body);
+        return store.fetch(
+          new Request(request.url, {
+            method: "POST",
+            body: request.body,
+            headers: {
+              "x-action": "upload-pack",
+              "x-repo-path": repoPath,
+            },
+          })
+        );
       }
 
       // POST /git-receive-pack (push)
       if (action === "git-receive-pack" && request.method === "POST") {
-        const body = new Uint8Array(await request.arrayBuffer());
-        // Acquire per-repo lock via Durable Object
-        const lockId = env.REPO_LOCK.idFromName(repoPath);
-        const lock = env.REPO_LOCK.get(lockId);
-        return lock.fetch(
-          new Request("https://lock/receive-pack", {
+        return store.fetch(
+          new Request(request.url, {
             method: "POST",
-            body,
+            body: request.body,
             headers: {
+              "x-action": "receive-pack",
               "x-repo-path": repoPath,
             },
           })
@@ -74,9 +89,15 @@ export default {
 
       // GET /HEAD
       if (action === "HEAD" && request.method === "GET") {
-        const head = await engine.getHead();
-        if (!head) return new Response("ref: refs/heads/main\n");
-        return new Response(head + "\n");
+        return store.fetch(
+          new Request(request.url, {
+            method: "GET",
+            headers: {
+              "x-action": "head",
+              "x-repo-path": repoPath,
+            },
+          })
+        );
       }
 
       return new Response("Not found\n", { status: 404 });

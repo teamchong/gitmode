@@ -1,13 +1,17 @@
 // Test worker — git protocol only (no vinext UI)
-// Used by vitest-pool-workers to run integration tests
+// Used by vitest-pool-workers to run integration tests.
+//
+// All git operations route through the RepoStore Durable Object,
+// which owns per-repo SQLite (refs, metadata) and coordinates
+// atomic ref updates.
 
 import { GitEngine } from "../src/git-engine";
 import { handleUploadPack } from "../src/upload-pack";
 import { handleReceivePack } from "../src/receive-pack";
 import { handleInfoRefs } from "../src/info-refs";
-import { RepoLock } from "../src/repo-lock";
+import { RepoStore } from "../src/repo-store";
 
-export { RepoLock };
+export { RepoStore };
 
 import type { Env } from "../src/env";
 export type { Env };
@@ -22,30 +26,64 @@ export default {
     if (match) {
       const [, owner, repo, action] = match;
       const repoPath = `${owner}/${repo}`;
-      const engine = new GitEngine(env, repoPath);
+
+      // Route through RepoStore DO
+      const storeId = env.REPO_STORE.idFromName(repoPath);
+      const store = env.REPO_STORE.get(storeId);
 
       if (action === "info/refs" && request.method === "GET") {
         const service = url.searchParams.get("service");
         if (service !== "git-upload-pack" && service !== "git-receive-pack") {
           return new Response("Unsupported service\n", { status: 403 });
         }
-        return handleInfoRefs(engine, service);
+        return store.fetch(
+          new Request(request.url, {
+            method: "GET",
+            headers: {
+              "x-action": "info-refs",
+              "x-repo-path": repoPath,
+              "x-service": service,
+            },
+          })
+        );
       }
 
       if (action === "git-upload-pack" && request.method === "POST") {
-        const body = new Uint8Array(await request.arrayBuffer());
-        return handleUploadPack(engine, body);
+        return store.fetch(
+          new Request(request.url, {
+            method: "POST",
+            body: request.body,
+            headers: {
+              "x-action": "upload-pack",
+              "x-repo-path": repoPath,
+            },
+          })
+        );
       }
 
       if (action === "git-receive-pack" && request.method === "POST") {
-        const body = new Uint8Array(await request.arrayBuffer());
-        return handleReceivePack(engine, body, env, repoPath);
+        return store.fetch(
+          new Request(request.url, {
+            method: "POST",
+            body: request.body,
+            headers: {
+              "x-action": "receive-pack",
+              "x-repo-path": repoPath,
+            },
+          })
+        );
       }
 
       if (action === "HEAD" && request.method === "GET") {
-        const head = await engine.getHead();
-        if (!head) return new Response("ref: refs/heads/main\n");
-        return new Response(head + "\n");
+        return store.fetch(
+          new Request(request.url, {
+            method: "GET",
+            headers: {
+              "x-action": "head",
+              "x-repo-path": repoPath,
+            },
+          })
+        );
       }
 
       return new Response("Not found\n", { status: 404 });

@@ -11,23 +11,27 @@
 import type { GitEngine } from "./git-engine";
 import { encodePktLine, FLUSH_PKT } from "./pkt-line";
 
-const CAPABILITIES = [
+const BASE_CAPABILITIES = [
   "report-status",
+  "delete-refs",
   "multi_ack_detailed",
   "side-band-64k",
   "thin-pack",
   "ofs-delta",
   "agent=gitmode/1.0",
-  "symref=HEAD:refs/heads/main",
   "object-format=sha1",
-].join(" ");
+];
 
 export async function handleInfoRefs(
   engine: GitEngine,
   service: string
 ): Promise<Response> {
-  const refs = await engine.listRefs();
-  const head = await engine.getHead();
+  const refs = engine.listRefs();
+  const head = engine.getHead() ?? "ref: refs/heads/main";
+
+  // Build capabilities with actual symref
+  const symrefTarget = head.startsWith("ref: ") ? head.slice(5) : "refs/heads/main";
+  const capabilities = [...BASE_CAPABILITIES, `symref=HEAD:${symrefTarget}`].join(" ");
 
   const lines: Uint8Array[] = [];
 
@@ -39,16 +43,17 @@ export async function handleInfoRefs(
     // Empty repo — advertise zero-id with capabilities
     const zeroId = "0".repeat(40);
     lines.push(
-      encodePktLine(`${zeroId} capabilities^{}\0${CAPABILITIES}\n`)
+      encodePktLine(`${zeroId} capabilities^{}\0${capabilities}\n`)
     );
   } else {
     let first = true;
 
     // HEAD first
     if (head) {
-      const headSha = await engine.getRef(head.replace("ref: ", ""));
+      const headRef = head.replace("ref: ", "").replace(/^refs\//, "");
+      const headSha = engine.getRef(headRef);
       if (headSha) {
-        const suffix = first ? `\0${CAPABILITIES}` : "";
+        const suffix = first ? `\0${capabilities}` : "";
         lines.push(encodePktLine(`${headSha} HEAD${suffix}\n`));
         first = false;
       }
@@ -59,7 +64,7 @@ export async function handleInfoRefs(
       a[0].localeCompare(b[0])
     );
     for (const [refname, sha1] of sortedRefs) {
-      const suffix = first ? `\0${CAPABILITIES}` : "";
+      const suffix = first ? `\0${capabilities}` : "";
       lines.push(encodePktLine(`${sha1} refs/${refname}${suffix}\n`));
       first = false;
     }

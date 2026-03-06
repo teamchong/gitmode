@@ -1,13 +1,10 @@
-// GitEngine — orchestrates R2 (objects), KV (refs), D1 (metadata)
+// GitEngine — orchestrates R2 (objects) and DO SQLite (refs, metadata)
 //
 // Storage layout:
-//   R2 key: "{repo}/objects/{sha1[0:2]}/{sha1[2:]}"  (loose objects)
-//   R2 key: "{repo}/packs/{sha1}.pack"                (packfiles)
-//   KV key: "{repo}/refs/{refname}"                   (branch/tag → sha1)
-//   KV key: "{repo}/HEAD"                             (symbolic ref)
-//   D1:     repos, commits, permissions, ssh_keys
+//   R2 key:  "{repo}/objects/{sha1[0:2]}/{sha1[2:]}"  (loose objects)
+//   R2 key:  "{repo}/worktrees/{branch}/{filepath}"    (materialized files)
+//   SQLite:  refs, head, repo_meta, commits, permissions (per-repo DO)
 
-import type { Env } from "./env";
 import { WasmEngine } from "./wasm-engine";
 
 // Object types matching Zig enum
@@ -17,13 +14,15 @@ export const OBJ_COMMIT = 3;
 export const OBJ_TAG = 4;
 
 export class GitEngine {
-  private env: Env;
+  private objects: R2Bucket;
   private repo: string;
+  private sql: SqlStorage | null;
   private wasm: WasmEngine | null = null;
 
-  constructor(env: Env, repo: string) {
-    this.env = env;
+  constructor(objects: R2Bucket, repo: string, sql: SqlStorage | null = null) {
+    this.objects = objects;
     this.repo = repo;
+    this.sql = sql;
   }
 
   private async getWasm(): Promise<WasmEngine> {
@@ -33,6 +32,11 @@ export class GitEngine {
     return this.wasm;
   }
 
+  private requireSql(): SqlStorage {
+    if (!this.sql) throw new Error("GitEngine: no SQL storage (ref operations require a DO context)");
+    return this.sql;
+  }
+
   // === Object storage (R2) ===
 
   private objectKey(sha1Hex: string): string {
@@ -40,17 +44,17 @@ export class GitEngine {
   }
 
   async getObject(sha1Hex: string): Promise<Uint8Array | null> {
-    const obj = await this.env.OBJECTS.get(this.objectKey(sha1Hex));
+    const obj = await this.objects.get(this.objectKey(sha1Hex));
     if (!obj) return null;
     return new Uint8Array(await obj.arrayBuffer());
   }
 
   async putObject(sha1Hex: string, data: Uint8Array): Promise<void> {
-    await this.env.OBJECTS.put(this.objectKey(sha1Hex), data);
+    await this.objects.put(this.objectKey(sha1Hex), data);
   }
 
   async hasObject(sha1Hex: string): Promise<boolean> {
-    const head = await this.env.OBJECTS.head(this.objectKey(sha1Hex));
+    const head = await this.objects.head(this.objectKey(sha1Hex));
     return head !== null;
   }
 
@@ -103,79 +107,69 @@ export class GitEngine {
     return { type, content };
   }
 
-  // === Refs (KV) ===
+  // === Refs (DO SQLite) ===
 
-  async getRef(refname: string): Promise<string | null> {
-    return this.env.REFS.get(`${this.repo}/refs/${refname}`);
+  getRef(refname: string): string | null {
+    const sql = this.requireSql();
+    const rows = [...sql.exec("SELECT sha FROM refs WHERE name = ?", refname)];
+    return rows.length > 0 ? (rows[0].sha as string) : null;
   }
 
-  async setRef(refname: string, sha1Hex: string): Promise<void> {
-    await this.env.REFS.put(`${this.repo}/refs/${refname}`, sha1Hex);
+  setRef(refname: string, sha1Hex: string): void {
+    const sql = this.requireSql();
+    sql.exec("INSERT OR REPLACE INTO refs (name, sha) VALUES (?, ?)", refname, sha1Hex);
   }
 
-  async deleteRef(refname: string): Promise<void> {
-    await this.env.REFS.delete(`${this.repo}/refs/${refname}`);
+  deleteRef(refname: string): void {
+    const sql = this.requireSql();
+    sql.exec("DELETE FROM refs WHERE name = ?", refname);
   }
 
-  async listRefs(): Promise<Map<string, string>> {
+  listRefs(): Map<string, string> {
+    const sql = this.requireSql();
     const refs = new Map<string, string>();
-    const prefix = `${this.repo}/refs/`;
-    let cursor: string | undefined;
-
-    do {
-      const list = await this.env.REFS.list({ prefix, cursor });
-      for (const key of list.keys) {
-        const refname = key.name.slice(prefix.length);
-        const value = await this.env.REFS.get(key.name);
-        if (value) refs.set(refname, value);
-      }
-      cursor = list.list_complete ? undefined : list.cursor;
-    } while (cursor);
-
+    for (const row of sql.exec("SELECT name, sha FROM refs")) {
+      refs.set(row.name as string, row.sha as string);
+    }
     return refs;
   }
 
-  async getHead(): Promise<string | null> {
-    return this.env.REFS.get(`${this.repo}/HEAD`);
+  getHead(): string | null {
+    const sql = this.requireSql();
+    const rows = [...sql.exec("SELECT value FROM head WHERE id = 1")];
+    return rows.length > 0 ? (rows[0].value as string) : null;
   }
 
-  async setHead(value: string): Promise<void> {
-    await this.env.REFS.put(`${this.repo}/HEAD`, value);
+  setHead(value: string): void {
+    const sql = this.requireSql();
+    sql.exec("INSERT OR REPLACE INTO head (id, value) VALUES (1, ?)", value);
   }
 
-  // === Metadata (D1) ===
+  // === Metadata (DO SQLite) ===
 
-  async ensureRepo(): Promise<void> {
+  ensureRepo(): void {
+    const sql = this.requireSql();
     const [owner, name] = this.repo.split("/");
-    await this.env.META.prepare(
-      `INSERT OR IGNORE INTO repos (owner, name, created_at) VALUES (?, ?, ?)`
-    )
-      .bind(owner, name, new Date().toISOString())
-      .run();
+    const rows = [...sql.exec("SELECT id FROM repo_meta WHERE id = 1")];
+    if (rows.length === 0) {
+      sql.exec(
+        "INSERT INTO repo_meta (id, owner, name, created_at) VALUES (1, ?, ?, ?)",
+        owner, name, new Date().toISOString()
+      );
+    }
   }
 
-  async indexCommit(
+  indexCommit(
     sha1Hex: string,
     author: string,
     message: string,
     timestamp: number
-  ): Promise<void> {
-    await this.env.META.prepare(
-      `INSERT OR IGNORE INTO commits (repo, sha1, author, message, timestamp) VALUES (?, ?, ?, ?, ?)`
-    )
-      .bind(this.repo, sha1Hex, author, message, timestamp)
-      .run();
-  }
-
-  // === SSH key management (D1) ===
-
-  async getSSHKeyOwner(fingerprint: string): Promise<string | null> {
-    const result = await this.env.META.prepare(
-      `SELECT owner FROM ssh_keys WHERE fingerprint = ?`
-    )
-      .bind(fingerprint)
-      .first<{ owner: string }>();
-    return result?.owner ?? null;
+  ): void {
+    const sql = this.requireSql();
+    sql.exec(
+      "INSERT OR IGNORE INTO commits (sha, author, message, timestamp) VALUES (?, ?, ?, ?)",
+      sha1Hex, author, message, timestamp
+    );
   }
 }
 

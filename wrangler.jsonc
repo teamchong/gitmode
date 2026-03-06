@@ -13,35 +13,16 @@
     }
   ],
 
-  // KV: refs (branches, tags, HEAD) — globally replicated fast reads
-  "kv_namespaces": [
-    {
-      "binding": "REFS",
-      "id": "gitmode-refs"
-    }
-  ],
-
-  // D1: metadata (repo list, commit index, permissions)
-  "d1_databases": [
-    {
-      "binding": "META",
-      "database_name": "gitmode-meta",
-      "database_id": "gitmode-meta"
-    }
-  ],
-
-  // Durable Objects: per-repo lock for atomic ref updates during push
+  // Durable Objects: per-repo SQLite for refs, metadata, permissions
   "durable_objects": {
     "bindings": [
-      { "name": "REPO_LOCK", "class_name": "RepoLock" }
+      { "name": "REPO_STORE", "class_name": "RepoStore" }
     ]
   },
 
   "migrations": [
-    {
-      "tag": "v1",
-      "new_classes": ["RepoLock"]
-    }
+    { "tag": "v1", "new_classes": ["RepoLock"] },
+    { "tag": "v2", "deleted_classes": ["RepoLock"], "new_sqlite_classes": ["RepoStore"] }
   ],
 
   // WASM module

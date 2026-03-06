@@ -9,26 +9,14 @@
     { "binding": "OBJECTS", "bucket_name": "gitmode-objects-test" }
   ],
 
-  "kv_namespaces": [
-    { "binding": "REFS", "id": "gitmode-refs-test" }
-  ],
-
-  "d1_databases": [
-    {
-      "binding": "META",
-      "database_name": "gitmode-meta-test",
-      "database_id": "gitmode-meta-test"
-    }
-  ],
-
   "durable_objects": {
     "bindings": [
-      { "name": "REPO_LOCK", "class_name": "RepoLock" }
+      { "name": "REPO_STORE", "class_name": "RepoStore" }
     ]
   },
 
   "migrations": [
-    { "tag": "v1", "new_classes": ["RepoLock"] }
+    { "tag": "v1", "new_sqlite_classes": ["RepoStore"] }
   ],
 
   "rules": [
