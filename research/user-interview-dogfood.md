@@ -134,7 +134,7 @@ GitMode has a **unique and defensible position** as the only full git server tha
 | Feature | Impact |
 |---------|--------|
 | **Authentication** | Any client can push/pull. `permissions` table exists but unused. |
-| **Web UI** | No way to browse repos, view commits, or read files in a browser. |
+| **Web UI broken** | A full vinext RSC web UI exists in `app/` (repo list, file browser, commit log, blob viewer, branches, tags) but is **broken** — it queries the old D1 `META` database (`env.META.prepare(...)`) which was removed when architecture migrated to per-repo DO SQLite. The `worker/index.ts` entry also imports deleted `RepoLock`. Needs migration to use the REST API or direct DO access. |
 | **Git protocol v2** | Modern git clients prefer v2. GitMode only speaks v1. |
 | **Signed commits** | No GPG/SSH signature verification. |
 | **Webhooks** | No event notifications for post-push, post-merge, etc. |
