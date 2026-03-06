@@ -1,195 +1,200 @@
 # User Interview: Dogfooding GitMode
 
 **Date:** 2026-03-06
-**Method:** Hands-on usage audit + competitive analysis
-**Persona:** Developer building a todo app project using gitmode as their git server
+**Method:** Hands-on usage audit + browser testing + performance benchmarks
+**Persona:** Developer using gitmode as their git server for real work
 
 ---
 
 ## Executive Summary
 
-GitMode has a **unique and defensible position** as the only full git server that runs entirely on Cloudflare Workers with zero infrastructure. The git protocol implementation is solid (clone, push, fetch all work correctly over HTTP and SSH), and the REST API adds a powerful programmatic layer that no other self-hosted git server provides. However, **data integrity bugs, missing features, and documentation drift** would cause serious problems in production.
+GitMode has a **unique and defensible position** as the only full git server that runs entirely on Cloudflare Workers with zero infrastructure. The git protocol implementation is solid (clone, push, fetch all work correctly over HTTP and SSH), and the REST API adds a powerful programmatic layer. The vinext web UI now works end-to-end. Performance is strong for small-medium repos but push latency at 500 files needs optimization.
 
-**Verdict:** Solid core protocol, impressive REST API, needs hardening.
-
----
-
-## Part 1: Issues Encountered (as a first-time user)
-
-### P0 - Critical (data loss / corruption)
-
-| # | Issue | Detail | Status |
-|---|-------|--------|--------|
-| 1 | **Three-way merge drops files** | When both sides modify the same directory, `mergeTrees()` takes one side's tree wholesale instead of recursing into subdirectories. Files silently lost. | **FIXED** |
-| 2 | **Concurrent commits lose data** | 5 parallel API commits to same branch → only 2 files survive. Each commit reads the same parent ref, creating divergent histories where the last writer wins. | **FIXED** |
-
-### P1 - Significant (blocks basic workflows)
-
-| # | Issue | Detail | Status |
-|---|-------|--------|--------|
-| 3 | **Init + immediate commit race condition** | Chaining `POST /init` and `POST /commits` in rapid succession can fail because init may not have committed SQLite state before commit arrives. | **FIXED** (auto-init in commit) |
-| 4 | **Missing author produces "undefined"** | Commit without author/email creates literal `"undefined <undefined>"` strings in git history. | **FIXED** (defaults to "unknown") |
-| 5 | **Deploy fails: wrangler.jsonc points to deleted file** | Production config referenced `./worker/index.ts` which imports deleted `RepoLock` and `vinext`. | **FIXED** |
-| 6 | **Deploy fails: CI missing Zig + binaryen** | Deploy workflow had no Zig setup, no libgit2 build, and apt binaryen was too old for Zig's WASM features. | **FIXED** |
-| 7 | **`multi_ack_detailed` advertised but not implemented** | Server advertised this capability but never implemented it, causing git clients to use a negotiation mode the server couldn't handle. | **FIXED** (removed capability) |
-
-### P2 - UX Friction
-
-| # | Issue | Detail | Status |
-|---|-------|--------|--------|
-| 8 | **Diff params non-obvious** | `?a=` and `?b=` instead of `?from=` and `?to=`. | **FIXED** (both accepted) |
-| 9 | **SSH "no common commits" warning** | Every `git fetch` shows a harmless but noisy warning because server didn't ACK recognized objects. | **FIXED** (proper ACK) |
-| 10 | **No `GET /api/repos` endpoint** | Can't list repositories. | **FIXED** (R2 prefix listing) |
-| 11 | **No repo metadata API** | `repo_meta` table exists with description/visibility but no GET/PATCH API. | **FIXED** |
-| 12 | **No commit detail by SHA** | Must reconstruct from `log` + `show`. No `GET /commits/:sha`. | **FIXED** |
-| 13 | **No file history** | Can't get commits affecting a specific file. | **FIXED** |
-| 14 | **No contributors endpoint** | Can't get author statistics. | **FIXED** |
-| 15 | **No repo stats** | No commit count, file count, size info. | **FIXED** |
-| 16 | **No CORS headers** | Browser-based clients can't access the API. | **FIXED** |
-| 17 | **Docs say `pnpm run dev`** | Correct command is `pnpm wrangler dev`. | **FIXED** |
+**Verdict:** Core protocol solid. Web UI functional. Performance acceptable. Ready for alpha testing.
 
 ---
 
-## Part 2: What Works Well
+## Part 1: Issues Found and Fixed
+
+### Session 1 — API & Protocol Audit (17 issues, all fixed)
+
+| # | Issue | Severity | Status |
+|---|-------|----------|--------|
+| 1 | Three-way merge drops files in subdirectories | P0 | **FIXED** |
+| 2 | Concurrent commits lose data (last-writer-wins) | P0 | **FIXED** |
+| 3 | Init + immediate commit race condition | P1 | **FIXED** |
+| 4 | Missing author produces `"undefined <undefined>"` | P1 | **FIXED** |
+| 5 | Deploy fails: worker imports deleted `RepoLock` | P1 | **FIXED** |
+| 6 | Deploy CI missing Zig + binaryen setup | P1 | **FIXED** |
+| 7 | `multi_ack_detailed` advertised but not implemented | P1 | **FIXED** |
+| 8 | Diff params non-obvious (`?a=` vs `?from=`) | P2 | **FIXED** |
+| 9 | SSH fetch shows noisy "no common commits" warning | P2 | **FIXED** |
+| 10 | No `GET /api/repos` endpoint | P2 | **FIXED** |
+| 11 | No repo metadata GET/PATCH API | P2 | **FIXED** |
+| 12 | No commit detail by SHA endpoint | P2 | **FIXED** |
+| 13 | No file history endpoint | P2 | **FIXED** |
+| 14 | No contributors endpoint | P2 | **FIXED** |
+| 15 | No repo stats endpoint | P2 | **FIXED** |
+| 16 | No CORS headers on API | P2 | **FIXED** |
+| 17 | Docs say wrong dev command | P2 | **FIXED** |
+
+### Session 2 — Web UI Testing (8 issues, all fixed)
+
+Tested all 8 vinext RSC pages with real repos via browser automation (CDP).
+
+| # | Issue | Severity | Status |
+|---|-------|----------|--------|
+| 18 | cherry-pick/revert/reset crash on undefined field names | P1 | **FIXED** |
+| 19 | Repo meta not initialized on `git push` | P1 | **FIXED** |
+| 20 | Commits not indexed after `git push` (stats/contributors empty) | P1 | **FIXED** |
+| 21 | `/show` endpoint broken (only accepted raw SHA, not refs) | P1 | **FIXED** |
+| 22 | Stats shows `commits: 0` for pushed repos | P1 | **FIXED** |
+| 23 | Commit detail page missing diff/changed files | P2 | **FIXED** |
+| 24 | No active tab indicator in navigation | P2 | **FIXED** |
+| 25 | README rendered as raw text (no markdown) | P2 | **FIXED** |
+
+---
+
+## Part 2: Performance Benchmarks
+
+**Environment:** macOS, localhost dev server (vite dev), single Durable Object
+
+### Git Protocol Operations
+
+| Operation | Small (3 files) | Medium (50 files) | Large (500 files) |
+|---|---|---|---|
+| **Initial push** | 283ms | 183ms | 972ms |
+| **Incremental push** | 85ms | 192ms (10 commits) | 827ms (5 commits) |
+| **Clone** | 95ms | 152ms | 372ms |
+| **Fetch** | 98ms | 153ms | 340ms |
+
+### REST API Response Times
+
+| Endpoint | Latency |
+|---|---|
+| GET /api/repos (list) | 54ms |
+| GET /api/repos/:o/:r (meta) | 44ms |
+| GET /branches | 43ms |
+| GET /log (50 commits) | 61ms |
+| GET /files (root listing) | 42ms |
+| GET /files/all (500 files) | 62ms |
+| GET /stats (500 files) | 167ms |
+| GET /contributors | 42ms |
+
+### Analysis
+
+**What's fast:**
+- API reads are consistently under 65ms (except stats which walks all file objects)
+- Clone and fetch are fast — 372ms for 500 files is acceptable
+- Incremental push for small repos is 85ms — competitive with any git host
+
+**What's slow:**
+- **Large initial push (972ms):** Bottleneck is R2 object writes — each of 500+ objects is a separate R2 PUT. Could batch with `putMany()` or use packfile storage.
+- **Large incremental push (827ms):** Worktree materialization re-writes all files on every push. Should diff and only update changed files.
+- **Stats endpoint (167ms):** Reads every blob to sum sizes. Could cache in SQLite.
+
+### Performance Optimization Priorities
+
+| Priority | Optimization | Expected Impact |
+|---|---|---|
+| 1 | **Batch R2 writes** during packfile unpack | Push 2-3x faster for large repos |
+| 2 | **Incremental worktree update** — only write changed files | Incremental push 5-10x faster |
+| 3 | **Cache file size in SQLite** during commit | Stats endpoint instant |
+| 4 | **Pack storage** — store packfiles as-is instead of unpacking to loose | Push much faster, clone uses existing pack |
+| 5 | **SIMD-accelerated delta encoding** for upload-pack | Faster clone/fetch for large repos |
+
+---
+
+## Part 3: What Works Well
 
 ### Git Protocol
-- **Clone/push/fetch all work correctly** over both HTTP and SSH
-- **Incremental push** sends only deltas — fast for iterative development
-- **Branch operations** (create, push, delete, rename) all work
-- **Tags** (lightweight and annotated) work via API and git push
-- **Cross-protocol interop** — push via SSH, pull via HTTP, commit via API: all three directions work seamlessly
-- **Binary files** preserve integrity through push → R2 → clone cycle
-- **Repo isolation** — different DOs, different R2 prefixes, zero contamination
+- Clone/push/fetch all work correctly over HTTP and SSH
+- Incremental push sends only deltas
+- Branch operations (create, push, delete, rename) all work
+- Tags (lightweight and annotated) work via API and git push
+- Cross-protocol interop — push via SSH, pull via HTTP, commit via API
+- Binary files preserve integrity through full round-trip
 
-### REST API
-- **30+ endpoints** covering all common git operations
-- **Merge** supports both fast-forward and three-way with automatic conflict resolution
-- **Cherry-pick and revert** work correctly with three-way merge
-- **Reset** moves branch pointers cleanly
-- **Rev-parse** supports branches, tags, HEAD, HEAD~N, HEAD^, raw SHAs
-- **File operations** (read, list, list-all) with ref support
+### REST API (35+ endpoints)
+- Full CRUD for branches, tags, commits
+- Merge (fast-forward + three-way), cherry-pick, revert, reset
+- File read/list/list-all with ref support
+- Rev-parse supports branches, tags, HEAD, HEAD~N, HEAD^, raw SHAs
+- Diff, log, file-log, contributors, stats
+- CORS enabled for browser clients
+
+### Web UI (vinext RSC)
+- 10 pages: homepage, owner, repo overview, file tree, blob viewer, commits, commit detail, branches, tags
+- Active tab indicator, markdown README rendering
+- Commit detail shows changed files with A/M/D indicators
+- All pages work with real data from RepoStore DO
 
 ### Architecture
-- **Durable Objects** provide strong consistency for refs — no stale reads
-- **R2** provides cheap, scalable object storage with content-addressed keys
-- **Zig WASM** handles all binary ops (SHA-1, zlib, packfile, delta) efficiently
-- **SSH proxy** cleanly translates SSH → HTTP with sideband passthrough
+- Durable Objects provide strong consistency for refs
+- R2 provides scalable content-addressed object storage
+- Zig WASM (791KB) handles SHA-1, zlib, packfile, delta
+- SSH proxy translates SSH→HTTP with sideband passthrough
 
 ---
 
-## Part 3: Competitive Landscape
-
-### Direct Competitors
+## Part 4: Competitive Landscape
 
 | | GitMode | GitHub | GitLab | Gitea | Soft Serve |
 |---|---|---|---|---|---|
 | **Self-hostable** | Yes (CF Workers) | No (SaaS) | Yes (heavy) | Yes (Go binary) | Yes (Go binary) |
 | **Serverless** | Yes | N/A | No | No | No |
 | **Infrastructure** | Zero (CF edge) | Managed | VMs/K8s | Single binary | Single binary |
-| **Cold start** | ~50ms (DO wake) | N/A | N/A | N/A | N/A |
-| **REST API** | 30+ git ops | Yes (extensive) | Yes (extensive) | Partial | No |
-| **SSH transport** | Dev proxy | Native | Native | Native | Native |
+| **REST API** | 35+ git ops | Yes (extensive) | Yes (extensive) | Partial | No |
+| **Web UI** | Basic (10 pages) | Full | Full | Full | TUI only |
+| **Auth** | None (yet) | OAuth/PAT/SSH | OAuth/LDAP/SAML | OAuth/LDAP | SSH keys |
 | **Git protocol** | Smart HTTP v1 | Smart HTTP v2 | Smart HTTP v2 | Smart HTTP v2 | SSH only |
-| **Auth** | None (yet) | OAuth/PAT/SSH keys | OAuth/LDAP/SAML | OAuth/LDAP | SSH keys |
-| **Web UI** | None | Full | Full | Full | TUI only |
 | **CI/CD** | None | Actions | CI/CD | Actions | None |
-| **Issues/PRs** | None | Full | Full | Full | None |
-| **Cost** | CF Workers pricing | Free tier + paid | Free tier + paid | Free | Free |
-| **Multi-region** | Yes (CF edge) | Yes (managed) | Manual | Manual | No |
 
-### GitMode's Unique Position (what nobody else does)
-
-1. **Zero-infrastructure git server** — Deploy to Cloudflare Workers, get a globally distributed git server. No VMs, no Docker, no maintenance.
-2. **Programmatic-first REST API** — 30+ endpoints for all git operations via JSON. Create repos, commit files, merge branches, cherry-pick — all via HTTP. No git binary required.
-3. **Per-repo isolation via Durable Objects** — Each repo is a strongly consistent DO with embedded SQLite. No shared database, no locking across repos.
-4. **Edge-native** — Sub-50ms git operations from any Cloudflare datacenter. No single point of failure.
-5. **Zig WASM engine** — SHA-1, zlib, packfile parsing, and delta encoding in optimized WASM with SIMD acceleration. 791KB binary.
-
-### Where GitMode Overlaps (competitors do it better today)
-
-| Area | Better Alternative | Why |
-|------|-------------------|-----|
-| Full-featured git hosting | GitHub / GitLab | Web UI, issues, PRs, CI/CD, code review |
-| Simple self-hosted git | Gitea | Single binary, full UI, mature ecosystem |
-| SSH-only minimal server | Soft Serve | Beautiful TUI, zero config, SSH native |
-| Git protocol v2 | All competitors | GitMode only supports v1 |
-| Enterprise features | GitLab | LDAP, SAML, audit logs, compliance |
-
-### Where GitMode Wins (nobody else does this)
-
-| Use Case | Why GitMode |
-|----------|-------------|
-| Serverless git for automation | REST API + zero infrastructure. Spin up repos on demand for CI, code review bots, or template generation. |
-| Multi-tenant code storage | One DO per repo, isolated by design. Perfect for platforms that store user code (like Replit, CodeSandbox). |
-| Edge-native version control | Git operations from any CF datacenter. Ideal for distributed teams or global dev platforms. |
-| Git-backed data versioning | Use git semantics (branch, merge, diff) for config files, schemas, or structured data — all via API. |
-| Embedded git for apps | No git binary needed. Commit files, create branches, merge — all from your application code. |
+### GitMode's Unique Position
+1. **Zero-infrastructure git server** — deploy to CF Workers, done
+2. **Git as an API** — 35+ REST endpoints, no git binary needed
+3. **Per-repo isolation** via Durable Objects with embedded SQLite
+4. **Edge-native** — sub-50ms from any CF datacenter
+5. **Zig WASM engine** — SHA-1, zlib, packfile, delta in 791KB WASM
 
 ---
 
-## Part 4: Remaining Gaps
+## Part 5: Remaining Gaps
 
-### Must-have (blocks adoption)
+### Must-have for alpha release
 
 | Feature | Impact |
 |---------|--------|
 | **Authentication** | Any client can push/pull. `permissions` table exists but unused. |
-| **Web UI broken** | A full vinext RSC web UI exists in `app/` (repo list, file browser, commit log, blob viewer, branches, tags) but is **broken** — it queries the old D1 `META` database (`env.META.prepare(...)`) which was removed when architecture migrated to per-repo DO SQLite. The `worker/index.ts` entry also imports deleted `RepoLock`. Needs migration to use the REST API or direct DO access. |
-| **Git protocol v2** | Modern git clients prefer v2. GitMode only speaks v1. |
-| **Signed commits** | No GPG/SSH signature verification. |
-| **Webhooks** | No event notifications for post-push, post-merge, etc. |
+| **Git protocol v2** | Modern git clients prefer v2. |
+| **Webhooks** | No event notifications for push/merge events. |
 
-### Nice-to-have (competitive parity)
+### Nice-to-have for competitive parity
 
 | Feature | Impact |
 |---------|--------|
-| **Blame** | WASM export exists (`libgit2_blame`) but ODB callbacks not wired to R2. |
+| **Blame** | WASM export exists but ODB callbacks not wired to R2. |
 | **Pull requests** | No PR model — merge is direct via API. |
+| **Shallow clone** | Full history always transferred. |
+| **Branch protection** | No rules for preventing force-push. |
 | **Code search** | No full-text search across repos. |
-| **Repo forking** | No fork/clone-on-server support. |
-| **Branch protection** | No rules for preventing force-push or requiring reviews. |
-| **Shallow clone** | Full history always transferred. Needs upload-pack depth negotiation. |
-| **LFS** | Large files stored as regular git objects. |
 
 ---
 
-## Part 5: Recommendations
+## Part 6: Recommendations
 
-### Tier 1: Production readiness (week 1-2)
+### Now: Performance + Auth (production readiness)
+1. Batch R2 writes during push (biggest perf win)
+2. Add authentication (API key / JWT + permissions table)
+3. Incremental worktree updates (only write changed files)
 
-1. **Add authentication** — API key or JWT. Wire up the existing `permissions` table. Without auth, nobody can deploy this publicly.
-2. **Add webhooks** — POST to a URL on push/merge/branch events. Essential for CI/CD integration.
-3. **Add branch protection** — Prevent force-push to main, require specific refs for push.
+### Next: Protocol + Integrations
+4. Git protocol v2 support
+5. Webhooks (post-push, post-merge events)
+6. Branch protection rules
 
-### Tier 2: Close the adoption gap (weeks 3-6)
-
-4. **Build a minimal web UI** — Repo list, file browser, commit log, diff viewer. Use the REST API as the backend. Even a read-only viewer dramatically improves discoverability.
-5. **Git protocol v2** — Modern clients use v2 by default. Supporting it removes the "old protocol" feel.
-6. **Wire up libgit2 blame** — Connect ODB host callbacks to R2 reads. The WASM export exists, just needs the bridge.
-
-### Tier 3: Strategic differentiation (month 2+)
-
-7. **PR model** — Create/review/merge pull requests via API. The programmatic PR workflow would be unique.
-8. **Code search** — Full-text search across repos using Workers AI or a search index in DO SQLite.
-9. **Template repos** — `POST /api/repos/:owner/:repo/fork` to clone a repo server-side. Enables "create from template" flows.
-10. **Git-backed CMS** — Position GitMode as a headless CMS: commit Markdown files via API, read them at the edge. Compete with Contentful/Sanity for static content.
-
----
-
-## Part 6: Positioning Recommendation
-
-### Current: "Serverless git hosting on Cloudflare Workers"
-**Problem:** Sounds like infrastructure tooling. Doesn't convey the "why".
-
-### Proposed: "Git as an API"
-**Tagline:** "Full git server as a REST API. Create repos, commit files, merge branches — all serverless on Cloudflare."
-
-### Target personas (in order):
-1. **Platform builders** — Building dev tools that need git storage (code playgrounds, template engines, config management)
-2. **Automation engineers** — CI/CD pipelines that need to create/modify repos programmatically
-3. **Cloudflare-native teams** — Already using Workers + R2, want integrated git without external dependencies
-
-### Anti-personas (don't target yet):
-- Teams wanting to replace GitHub/GitLab (need web UI, issues, PRs)
-- Solo developers (just use GitHub)
-- Enterprise (need LDAP, audit logs, compliance)
+### Later: Platform features
+7. Pull request model via API
+8. Wire up libgit2 blame
+9. Code search via DO SQLite or Workers AI
+10. Template repos / server-side fork
