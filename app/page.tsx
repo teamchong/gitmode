@@ -1,22 +1,11 @@
-import { getEnv } from "./lib/env";
-
-interface Repo {
-  owner: string;
-  name: string;
-  description: string | null;
-  default_branch: string;
-}
+import { listRepos } from "./lib/api";
 
 export default async function HomePage() {
-  let repos: Repo[] = [];
+  let repos: Array<{ owner: string; name: string }> = [];
   try {
-    const env = getEnv();
-    const result = await env.META.prepare(
-      "SELECT owner, name, description, default_branch FROM repos ORDER BY owner, name"
-    ).all<Repo>();
-    repos = result.results;
+    repos = await listRepos();
   } catch {
-    // env not available or DB empty — show empty state
+    // env not available or no repos yet
   }
 
   return (
@@ -41,7 +30,6 @@ export default async function HomePage() {
           <thead>
             <tr>
               <th>Repository</th>
-              <th>Description</th>
             </tr>
           </thead>
           <tbody>
@@ -51,9 +39,6 @@ export default async function HomePage() {
                   <a href={`/${repo.owner}/${repo.name}`}>
                     {repo.owner}/{repo.name}
                   </a>
-                </td>
-                <td style={{ color: "var(--text-secondary)" }}>
-                  {repo.description || ""}
                 </td>
               </tr>
             ))}

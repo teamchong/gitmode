@@ -1,4 +1,5 @@
 import { getEnv } from "../../lib/env";
+import { getRepoMeta } from "../../lib/api";
 
 interface TreeEntry {
   name: string;
@@ -11,11 +12,15 @@ export default async function RepoOverview({
   params: Promise<{ owner: string; repo: string }>;
 }) {
   const { owner, repo } = await params;
-  const branch = "main";
+  let branch = "main";
   let entries: TreeEntry[] = [];
   let readme = "";
 
   try {
+    // Get default branch from repo metadata
+    const meta = await getRepoMeta(owner, repo);
+    if (meta?.default_branch) branch = meta.default_branch;
+
     const env = getEnv();
 
     // List root directory from R2 worktree

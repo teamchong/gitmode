@@ -1,9 +1,4 @@
-import { getEnv } from "../../../lib/env";
-
-interface Branch {
-  name: string;
-  sha: string;
-}
+import { listBranches } from "../../../lib/api";
 
 export default async function BranchesPage({
   params,
@@ -11,20 +6,10 @@ export default async function BranchesPage({
   params: Promise<{ owner: string; repo: string }>;
 }) {
   const { owner, repo } = await params;
-  let branches: Branch[] = [];
+  let branches: Array<{ name: string; sha: string; isHead: boolean }> = [];
 
   try {
-    const env = getEnv();
-    const prefix = `${owner}/${repo}/refs/heads/`;
-    const listed = await env.REFS.list({ prefix });
-
-    for (const key of listed.keys) {
-      const name = key.name.slice(prefix.length);
-      if (name) {
-        const sha = await env.REFS.get(key.name);
-        branches.push({ name, sha: sha || "" });
-      }
-    }
+    branches = await listBranches(owner, repo);
   } catch {
     // env not available
   }
@@ -54,6 +39,11 @@ export default async function BranchesPage({
                   <a href={`/${owner}/${repo}/commits/${branch.name}`}>
                     {branch.name}
                   </a>
+                  {branch.isHead && (
+                    <span style={{ color: "var(--success)", marginLeft: 8, fontSize: "12px" }}>
+                      HEAD
+                    </span>
+                  )}
                 </td>
                 <td>
                   <a

@@ -1,11 +1,4 @@
-import { getEnv } from "../../../../lib/env";
-
-interface Commit {
-  sha1: string;
-  author: string;
-  message: string;
-  timestamp: number;
-}
+import { getLog } from "../../../../lib/api";
 
 export default async function CommitsPage({
   params,
@@ -13,17 +6,17 @@ export default async function CommitsPage({
   params: Promise<{ owner: string; repo: string; branch: string }>;
 }) {
   const { owner, repo, branch } = await params;
-  let commits: Commit[] = [];
+  let commits: Array<{
+    sha: string;
+    author: string;
+    authorTimestamp: number;
+    message: string;
+  }> = [];
 
   try {
-    const env = getEnv();
-    const repoKey = `${owner}/${repo}`;
-    const result = await env.META.prepare(
-      "SELECT sha1, author, message, timestamp FROM commits WHERE repo = ? ORDER BY timestamp DESC LIMIT 50"
-    ).bind(repoKey).all<Commit>();
-    commits = result.results;
+    commits = await getLog(owner, repo, branch, 50);
   } catch {
-    // env not available or DB empty
+    // env not available or no commits
   }
 
   return (
@@ -40,14 +33,14 @@ export default async function CommitsPage({
         <div>
           {commits.map((commit) => (
             <div
-              key={commit.sha1}
+              key={commit.sha}
               style={{
                 padding: "12px 0",
                 borderBottom: "1px solid var(--border)",
               }}
             >
               <div style={{ marginBottom: 4 }}>
-                <a href={`/${owner}/${repo}/commit/${commit.sha1}`}>
+                <a href={`/${owner}/${repo}/commit/${commit.sha}`}>
                   {commit.message.split("\n")[0]}
                 </a>
               </div>
@@ -55,13 +48,13 @@ export default async function CommitsPage({
                 <span>{commit.author}</span>
                 <span style={{ margin: "0 8px" }}>·</span>
                 <a
-                  href={`/${owner}/${repo}/commit/${commit.sha1}`}
+                  href={`/${owner}/${repo}/commit/${commit.sha}`}
                   style={{ color: "var(--text-secondary)" }}
                 >
-                  {commit.sha1.slice(0, 7)}
+                  {commit.sha.slice(0, 7)}
                 </a>
                 <span style={{ margin: "0 8px" }}>·</span>
-                <span>{formatRelativeTime(commit.timestamp)}</span>
+                <span>{formatRelativeTime(commit.authorTimestamp)}</span>
               </div>
             </div>
           ))}
@@ -73,7 +66,6 @@ export default async function CommitsPage({
 
 function formatRelativeTime(timestamp: number): string {
   const now = Date.now();
-  // timestamp may be in seconds (git) or milliseconds
   const ts = timestamp < 1e12 ? timestamp * 1000 : timestamp;
   const diff = now - ts;
 

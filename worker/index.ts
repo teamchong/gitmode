@@ -1,89 +1,354 @@
-// gitmode worker entry — handles git protocol AND vinext UI
+// gitmode worker entry — handles git protocol, REST API, AND vinext UI
 //
 // Routes:
-//   *.git/*  → git protocol handlers (info-refs, upload-pack, receive-pack)
-//   /*       → vinext RSC UI
+//   *.git/*            → git protocol handlers
+//   /api/repos/*       → REST API
+//   /*                 → vinext RSC UI
 
 import handler from "vinext/server/app-router-entry";
-import { GitEngine } from "../src/git-engine";
-import { handleUploadPack } from "../src/upload-pack";
-import { handleReceivePack } from "../src/receive-pack";
-import { handleInfoRefs } from "../src/info-refs";
-import { RepoLock } from "../src/repo-lock";
+import { RepoStore } from "../src/repo-store";
 
-export { RepoLock };
+export { RepoStore };
 
 import type { Env } from "../src/env";
 export type { Env };
 
-// Match git protocol routes: /:owner/:repo.git/...
-const GIT_ROUTE_RE = /^\/([^/]+)\/([^/]+?)\.git\/(.+)$/;
+const GIT_ROUTE = /^\/([^/]+)\/([^/]+?)\.git\/(.+)$/;
+const API_ROUTE = /^\/api\/repos\/([^/]+)\/([^/]+)(?:\/(.*))?$/;
+const LIST_REPOS_ROUTE = /^\/api\/repos(?:\/([^/]+))?\/?$/;
+
+function getStore(env: Env, repoPath: string) {
+  const id = env.REPO_STORE.idFromName(repoPath);
+  return env.REPO_STORE.get(id);
+}
+
+function corsHeaders(): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(corsHeaders())) {
+    headers.set(k, v);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Expose env to RSC components via globalThis
     (globalThis as any).__gitmode_env__ = env;
 
-    const url = new URL(request.url);
-    const match = url.pathname.match(GIT_ROUTE_RE);
-
-    if (match) {
-      return handleGitRequest(request, env, url, match);
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    // Everything else goes to vinext UI
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // --- List repos ---
+    const listMatch = path.match(LIST_REPOS_ROUTE);
+    if (listMatch && request.method === "GET") {
+      const ownerFilter = listMatch[1];
+      try {
+        return withCors(await listRepos(env, ownerFilter));
+      } catch (err) {
+        console.error(`gitmode list-repos error: ${err}`);
+        return withCors(Response.json({ error: "Internal error" }, { status: 500 }));
+      }
+    }
+
+    // --- REST API ---
+    const apiMatch = path.match(API_ROUTE);
+    if (apiMatch) {
+      const [, owner, repo, rest = ""] = apiMatch;
+      const repoPath = `${owner}/${repo}`;
+      const store = getStore(env, repoPath);
+
+      try {
+        return withCors(await routeApi(store, repoPath, rest, request, url));
+      } catch (err) {
+        console.error(`gitmode api error: ${err}`);
+        return withCors(Response.json({ error: "Internal error" }, { status: 500 }));
+      }
+    }
+
+    // --- Git protocol ---
+    const gitMatch = path.match(GIT_ROUTE);
+    if (gitMatch) {
+      const [, owner, repo, action] = gitMatch;
+      const repoPath = `${owner}/${repo}`;
+      const store = getStore(env, repoPath);
+
+      try {
+        return await routeGit(store, repoPath, action, request, url);
+      } catch (err) {
+        console.error(`gitmode error: ${err}`);
+        return new Response("Internal error\n", { status: 500 });
+      }
+    }
+
+    // --- Vinext UI (everything else) ---
     return handler.fetch(request);
   },
 };
 
-async function handleGitRequest(
-  request: Request,
-  env: Env,
-  url: URL,
-  match: RegExpMatchArray
-): Promise<Response> {
-  const [, owner, repo, action] = match;
-  const repoPath = `${owner}/${repo}`;
-  const engine = new GitEngine(env, repoPath);
+async function listRepos(env: Env, ownerFilter?: string): Promise<Response> {
+  const prefix = ownerFilter ? `${ownerFilter}/` : "";
+  const listed = await env.OBJECTS.list({ prefix, delimiter: "/objects/" });
+  const repos: Array<{ owner: string; name: string }> = [];
+  const seen = new Set<string>();
 
-  // GET /info/refs?service=...
+  for (const p of listed.delimitedPrefixes) {
+    const repoPath = p.replace(/\/objects\/$/, "");
+    if (seen.has(repoPath)) continue;
+    seen.add(repoPath);
+    const [owner, name] = repoPath.split("/");
+    if (owner && name) repos.push({ owner, name });
+  }
+
+  return Response.json({ repos });
+}
+
+function forwardToStore(
+  store: Rpc.DurableObjectBranded,
+  request: Request,
+  headers: Record<string, string>,
+): Promise<Response> {
+  return (store as any).fetch(
+    new Request(request.url, {
+      method: request.method,
+      body: request.body,
+      headers,
+    })
+  );
+}
+
+async function routeGit(
+  store: Rpc.DurableObjectBranded,
+  repoPath: string,
+  action: string,
+  request: Request,
+  url: URL,
+): Promise<Response> {
   if (action === "info/refs" && request.method === "GET") {
     const service = url.searchParams.get("service");
-    if (
-      service !== "git-upload-pack" &&
-      service !== "git-receive-pack"
-    ) {
+    if (service !== "git-upload-pack" && service !== "git-receive-pack") {
       return new Response("Unsupported service\n", { status: 403 });
     }
-    return handleInfoRefs(engine, service);
+    return forwardToStore(store, request, {
+      "x-action": "info-refs",
+      "x-repo-path": repoPath,
+      "x-service": service,
+    });
   }
 
-  // POST /git-upload-pack (clone/fetch)
   if (action === "git-upload-pack" && request.method === "POST") {
-    const body = new Uint8Array(await request.arrayBuffer());
-    return handleUploadPack(engine, body);
+    return forwardToStore(store, request, {
+      "x-action": "upload-pack",
+      "x-repo-path": repoPath,
+    });
   }
 
-  // POST /git-receive-pack (push)
   if (action === "git-receive-pack" && request.method === "POST") {
-    const body = new Uint8Array(await request.arrayBuffer());
-    const lockId = env.REPO_LOCK.idFromName(repoPath);
-    const lock = env.REPO_LOCK.get(lockId);
-    return lock.fetch(
-      new Request("https://lock/receive-pack", {
-        method: "POST",
-        body,
-        headers: { "x-repo-path": repoPath },
-      })
-    );
+    return forwardToStore(store, request, {
+      "x-action": "receive-pack",
+      "x-repo-path": repoPath,
+    });
   }
 
-  // GET /HEAD
   if (action === "HEAD" && request.method === "GET") {
-    const head = await engine.getHead();
-    if (!head) return new Response("ref: refs/heads/main\n");
-    return new Response(head + "\n");
+    return forwardToStore(store, request, {
+      "x-action": "head",
+      "x-repo-path": repoPath,
+    });
   }
 
   return new Response("Not found\n", { status: 404 });
+}
+
+function sendApiAction(
+  store: Rpc.DurableObjectBranded,
+  request: Request,
+  repoPath: string,
+  apiAction: string,
+): Promise<Response> {
+  return (store as any).fetch(
+    new Request(request.url, {
+      method: request.method,
+      body: request.method !== "GET" ? request.body : undefined,
+      headers: {
+        "x-action": "api",
+        "x-repo-path": repoPath,
+        "x-api-action": apiAction,
+        "content-type": "application/json",
+      },
+    })
+  );
+}
+
+function sendApiBody(
+  store: Rpc.DurableObjectBranded,
+  request: Request,
+  repoPath: string,
+  apiAction: string,
+  body: string,
+): Promise<Response> {
+  return (store as any).fetch(
+    new Request(request.url, {
+      method: "POST",
+      body,
+      headers: {
+        "x-action": "api",
+        "x-repo-path": repoPath,
+        "x-api-action": apiAction,
+        "content-type": "application/json",
+      },
+    })
+  );
+}
+
+async function routeApi(
+  store: Rpc.DurableObjectBranded,
+  repoPath: string,
+  rest: string,
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  const method = request.method;
+
+  // GET /  (repo metadata)
+  if (rest === "" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "get-meta");
+  }
+
+  // PATCH / (update repo metadata)
+  if (rest === "" && method === "PATCH") {
+    return sendApiAction(store, request, repoPath, "update-meta");
+  }
+
+  // POST /init
+  if (rest === "init" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "init");
+  }
+
+  // GET /files?ref=...&path=...
+  if (rest === "files" && method === "GET") {
+    return sendApiAction(store, request, repoPath, url.searchParams.has("path") ? "read-file" : "list-files");
+  }
+
+  // GET /files/all?ref=...
+  if (rest === "files/all" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "list-all-files");
+  }
+
+  // POST /commits
+  if (rest === "commits" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "commit");
+  }
+  // GET /commits/:sha
+  const commitMatch = rest.match(/^commits\/([0-9a-f]{40})$/);
+  if (commitMatch && method === "GET") {
+    const commitUrl = new URL(request.url);
+    commitUrl.searchParams.set("sha", commitMatch[1]);
+    return sendApiAction(store, new Request(commitUrl, request), repoPath, "get-commit");
+  }
+
+  // GET /log?ref=...&max=...&path=...
+  if (rest === "log" && method === "GET") {
+    const logUrl = new URL(request.url);
+    if (logUrl.searchParams.has("path")) {
+      return sendApiAction(store, request, repoPath, "file-log");
+    }
+    return sendApiAction(store, request, repoPath, "log");
+  }
+
+  // GET /contributors
+  if (rest === "contributors" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "contributors");
+  }
+
+  // GET /stats
+  if (rest === "stats" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "stats");
+  }
+
+  // GET /diff?a=...&b=... (or ?from=...&to=...)
+  if (rest === "diff" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "diff");
+  }
+
+  // Branches
+  if (rest === "branches" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "list-branches");
+  }
+  if (rest === "branches" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "create-branch");
+  }
+  const branchMatch = rest.match(/^branches\/(.+)$/);
+  if (branchMatch && method === "DELETE") {
+    return sendApiBody(store, request, repoPath, "delete-branch",
+      JSON.stringify({ name: decodeURIComponent(branchMatch[1]) }));
+  }
+  if (branchMatch && method === "PATCH") {
+    const reqBody = await request.json() as { newName: string };
+    return sendApiBody(store, request, repoPath, "rename-branch",
+      JSON.stringify({ oldName: decodeURIComponent(branchMatch[1]), newName: reqBody.newName }));
+  }
+
+  // Checkout
+  if (rest === "checkout" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "checkout");
+  }
+
+  // Tags
+  if (rest === "tags" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "list-tags");
+  }
+  if (rest === "tags" && method === "POST") {
+    const body = await request.json() as Record<string, unknown>;
+    const action = body.message ? "create-annotated-tag" : "create-tag";
+    return sendApiBody(store, request, repoPath, action, JSON.stringify(body));
+  }
+  const tagMatch = rest.match(/^tags\/(.+)$/);
+  if (tagMatch && method === "DELETE") {
+    return sendApiBody(store, request, repoPath, "delete-tag",
+      JSON.stringify({ name: decodeURIComponent(tagMatch[1]) }));
+  }
+
+  // Merge, cherry-pick, revert, reset
+  if (rest === "merge" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "merge");
+  }
+  if (rest === "cherry-pick" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "cherry-pick");
+  }
+  if (rest === "revert" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "revert");
+  }
+  if (rest === "reset" && method === "POST") {
+    return sendApiAction(store, request, repoPath, "reset");
+  }
+
+  // Rev-parse
+  if (rest === "rev-parse" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "rev-parse");
+  }
+
+  // Show object
+  if (rest === "show" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "show");
+  }
+
+  return Response.json({ error: "Not found" }, { status: 404 });
 }

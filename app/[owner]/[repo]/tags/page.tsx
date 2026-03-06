@@ -1,9 +1,4 @@
-import { getEnv } from "../../../lib/env";
-
-interface Tag {
-  name: string;
-  sha: string;
-}
+import { listTags } from "../../../lib/api";
 
 export default async function TagsPage({
   params,
@@ -11,20 +6,10 @@ export default async function TagsPage({
   params: Promise<{ owner: string; repo: string }>;
 }) {
   const { owner, repo } = await params;
-  let tags: Tag[] = [];
+  let tags: Array<{ name: string; sha: string; type: string; tagger?: string; message?: string }> = [];
 
   try {
-    const env = getEnv();
-    const prefix = `${owner}/${repo}/refs/tags/`;
-    const listed = await env.REFS.list({ prefix });
-
-    for (const key of listed.keys) {
-      const name = key.name.slice(prefix.length);
-      if (name) {
-        const sha = await env.REFS.get(key.name);
-        tags.push({ name, sha: sha || "" });
-      }
-    }
+    tags = await listTags(owner, repo);
   } catch {
     // env not available
   }
@@ -44,13 +29,24 @@ export default async function TagsPage({
           <thead>
             <tr>
               <th>Tag</th>
+              <th>Type</th>
               <th>SHA</th>
             </tr>
           </thead>
           <tbody>
             {tags.map((tag) => (
               <tr key={tag.name}>
-                <td>{tag.name}</td>
+                <td>
+                  {tag.name}
+                  {tag.message && (
+                    <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                      {tag.message.split("\n")[0]}
+                    </div>
+                  )}
+                </td>
+                <td style={{ color: "var(--text-secondary)" }}>
+                  {tag.type}
+                </td>
                 <td>
                   <a
                     href={`/${owner}/${repo}/commit/${tag.sha}`}
