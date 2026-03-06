@@ -159,6 +159,30 @@ export class GitEngine {
     }
   }
 
+  getRepoMeta(): Record<string, unknown> | null {
+    const sql = this.requireSql();
+    const rows = [...sql.exec("SELECT * FROM repo_meta WHERE id = 1")];
+    if (rows.length === 0) return null;
+    return rows[0] as Record<string, unknown>;
+  }
+
+  updateRepoMeta(fields: Record<string, string>): void {
+    const sql = this.requireSql();
+    const allowed = ["description", "visibility", "default_branch"];
+    const sets: string[] = [];
+    const values: string[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (allowed.includes(key)) {
+        sets.push(`${key} = ?`);
+        values.push(val);
+      }
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = ?");
+    values.push(new Date().toISOString());
+    sql.exec(`UPDATE repo_meta SET ${sets.join(", ")} WHERE id = 1`, ...values);
+  }
+
   indexCommit(
     sha1Hex: string,
     author: string,

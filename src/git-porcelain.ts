@@ -654,6 +654,111 @@ export class GitPorcelain {
     }));
   }
 
+  // === commit detail ===
+
+  /** Get structured commit data by SHA. */
+  async getCommit(sha: string): Promise<CommitInfo | null> {
+    const resolved = await this.resolveRef(sha);
+    if (!resolved) return null;
+    const obj = await this.engine.readObject(resolved);
+    if (!obj || obj.type !== OBJ_COMMIT) return null;
+    return parseCommit(resolved, obj.content);
+  }
+
+  // === file history ===
+
+  /** Walk commit history, filtered to commits that touch a specific file path. */
+  async fileLog(ref: string, path: string, maxCount = 50): Promise<CommitInfo[]> {
+    const startSha = await this.resolveRef(ref);
+    if (!startSha) return [];
+
+    const visited = new Set<string>();
+    const queue = [startSha];
+    const commits: CommitInfo[] = [];
+
+    while (queue.length > 0 && commits.length < maxCount) {
+      const sha = queue.shift()!;
+      if (visited.has(sha)) continue;
+      visited.add(sha);
+
+      const obj = await this.engine.readObject(sha);
+      if (!obj || obj.type !== OBJ_COMMIT) continue;
+
+      const info = parseCommit(sha, obj.content);
+
+      // Check if this commit changed the file relative to its first parent
+      const fileSha = await this.getFileShaInTree(info.tree, path);
+      let parentFileSha: string | null = null;
+      if (info.parents.length > 0) {
+        const parentObj = await this.engine.readObject(info.parents[0]);
+        if (parentObj && parentObj.type === OBJ_COMMIT) {
+          const parentInfo = parseCommit(info.parents[0], parentObj.content);
+          parentFileSha = await this.getFileShaInTree(parentInfo.tree, path);
+        }
+      }
+
+      // Include if file was added, modified, or deleted in this commit
+      if (fileSha !== parentFileSha) {
+        commits.push(info);
+      }
+
+      queue.push(...info.parents);
+    }
+
+    return commits;
+  }
+
+  // === contributors ===
+
+  /** Aggregate author statistics from the commit index. */
+  contributors(): Array<{ name: string; commits: number; lastCommit: number }> {
+    const sql = (this.engine as any).sql as SqlStorage;
+    if (!sql) return [];
+    const rows = [...sql.exec(
+      `SELECT author, COUNT(*) as commits, MAX(timestamp) as lastCommit
+       FROM commits GROUP BY author ORDER BY commits DESC`
+    )];
+    return rows.map(r => ({
+      name: r.author as string,
+      commits: r.commits as number,
+      lastCommit: r.lastCommit as number,
+    }));
+  }
+
+  // === repo stats ===
+
+  /** Get repository statistics. */
+  async stats(ref = "HEAD"): Promise<{
+    commits: number;
+    branches: number;
+    tags: number;
+    files: number;
+    size: number;
+  }> {
+    const sql = (this.engine as any).sql as SqlStorage;
+    const commitCount = sql
+      ? ([...sql.exec("SELECT COUNT(*) as c FROM commits")][0]?.c as number ?? 0)
+      : 0;
+    const branches = this.listBranches().length;
+    const tags = (await this.listTags()).length;
+
+    // Count files and total size
+    const allFiles = await this.listAllFiles(ref);
+    let totalSize = 0;
+    for (const f of allFiles) {
+      const obj = await this.engine.readObject(f.sha);
+      if (obj) totalSize += obj.content.length;
+    }
+
+    return {
+      commits: commitCount,
+      branches,
+      tags,
+      files: allFiles.length,
+      size: totalSize,
+    };
+  }
+
   // === cherry-pick ===
 
   /** Apply a commit's changes onto a target ref. */
@@ -780,6 +885,25 @@ export class GitPorcelain {
     if (this.engine.getRef(`heads/${ref}`)) return `heads/${ref}`;
     if (this.engine.getRef(`tags/${ref}`)) return `tags/${ref}`;
     return `heads/${ref}`;
+  }
+
+  /** Get the SHA of a file at a path in a tree, or null if not present. */
+  private async getFileShaInTree(treeSha: string, path: string): Promise<string | null> {
+    const parts = path.split("/").filter(Boolean);
+    let currentTree = treeSha;
+
+    for (let i = 0; i < parts.length; i++) {
+      const obj = await this.engine.readObject(currentTree);
+      if (!obj || obj.type !== OBJ_TREE) return null;
+
+      const entries = parseTreeEntries(obj.content);
+      const entry = entries.find(e => e.name === parts[i]);
+      if (!entry) return null;
+
+      if (i === parts.length - 1) return entry.sha;
+      currentTree = entry.sha;
+    }
+    return null;
   }
 
   private async readPathFromTree(treeSha: string, path: string): Promise<Uint8Array | null> {

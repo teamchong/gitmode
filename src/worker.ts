@@ -8,11 +8,16 @@
 //   GET  /:owner/:repo.git/HEAD                                → default branch
 //
 // REST API routes (for agents/programmatic use):
+//   GET  /api/repos                                    → list repos
+//   GET  /api/repos/:owner                             → list repos by owner
+//   GET  /api/repos/:owner/:repo                       → repo metadata
+//   PATCH /api/repos/:owner/:repo                      → update repo metadata
 //   POST /api/repos/:owner/:repo/init
 //   GET  /api/repos/:owner/:repo/files?ref=...&path=...
 //   GET  /api/repos/:owner/:repo/files/all?ref=...
 //   POST /api/repos/:owner/:repo/commits
-//   GET  /api/repos/:owner/:repo/log?ref=...&max=...
+//   GET  /api/repos/:owner/:repo/commits/:sha          → commit detail
+//   GET  /api/repos/:owner/:repo/log?ref=...&max=...&path=...
 //   GET  /api/repos/:owner/:repo/diff?a=...&b=...
 //   GET  /api/repos/:owner/:repo/branches
 //   POST /api/repos/:owner/:repo/branches
@@ -28,6 +33,8 @@
 //   POST /api/repos/:owner/:repo/reset
 //   GET  /api/repos/:owner/:repo/rev-parse?ref=...
 //   GET  /api/repos/:owner/:repo/show?sha=...
+//   GET  /api/repos/:owner/:repo/contributors
+//   GET  /api/repos/:owner/:repo/stats?ref=...
 //
 // All operations route through a per-repo RepoStore Durable Object.
 
@@ -46,8 +53,34 @@ function getStore(env: Env, repoPath: string) {
   return env.REPO_STORE.get(id);
 }
 
+function corsHeaders(): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(corsHeaders())) {
+    headers.set(k, v);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -56,10 +89,10 @@ export default {
     if (listMatch && request.method === "GET") {
       const ownerFilter = listMatch[1];
       try {
-        return await listRepos(env, ownerFilter);
+        return withCors(await listRepos(env, ownerFilter));
       } catch (err) {
         console.error(`gitmode list-repos error: ${err}`);
-        return Response.json({ error: "Internal error" }, { status: 500 });
+        return withCors(Response.json({ error: "Internal error" }, { status: 500 }));
       }
     }
 
@@ -71,10 +104,10 @@ export default {
       const store = getStore(env, repoPath);
 
       try {
-        return await routeApi(store, repoPath, rest, request, url);
+        return withCors(await routeApi(store, repoPath, rest, request, url));
       } catch (err) {
         console.error(`gitmode api error: ${err}`);
-        return Response.json({ error: "Internal error" }, { status: 500 });
+        return withCors(Response.json({ error: "Internal error" }, { status: 500 }));
       }
     }
 
@@ -223,6 +256,16 @@ async function routeApi(
 ): Promise<Response> {
   const method = request.method;
 
+  // GET /  (repo metadata)
+  if (rest === "" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "get-meta");
+  }
+
+  // PATCH / (update repo metadata)
+  if (rest === "" && method === "PATCH") {
+    return sendApiAction(store, request, repoPath, "update-meta");
+  }
+
   // POST /init
   if (rest === "init" && method === "POST") {
     return sendApiAction(store, request, repoPath, "init");
@@ -242,10 +285,31 @@ async function routeApi(
   if (rest === "commits" && method === "POST") {
     return sendApiAction(store, request, repoPath, "commit");
   }
+  // GET /commits/:sha
+  const commitMatch = rest.match(/^commits\/([0-9a-f]{40})$/);
+  if (commitMatch && method === "GET") {
+    const commitUrl = new URL(request.url);
+    commitUrl.searchParams.set("sha", commitMatch[1]);
+    return sendApiAction(store, new Request(commitUrl, request), repoPath, "get-commit");
+  }
 
-  // GET /log?ref=...&max=...
+  // GET /log?ref=...&max=...&path=...
   if (rest === "log" && method === "GET") {
+    const logUrl = new URL(request.url);
+    if (logUrl.searchParams.has("path")) {
+      return sendApiAction(store, request, repoPath, "file-log");
+    }
     return sendApiAction(store, request, repoPath, "log");
+  }
+
+  // GET /contributors
+  if (rest === "contributors" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "contributors");
+  }
+
+  // GET /stats
+  if (rest === "stats" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "stats");
   }
 
   // GET /diff?a=...&b=... (or ?from=...&to=...)

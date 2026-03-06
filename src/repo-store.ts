@@ -368,6 +368,50 @@ async function handleApiAction(
       return Response.json({ sha });
     }
 
+    // --- commit detail ---
+    case "get-commit": {
+      const sha = url.searchParams.get("sha") ?? "";
+      const commit = await porcelain.getCommit(sha);
+      if (!commit) return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json(commit);
+    }
+
+    // --- file history ---
+    case "file-log": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const path = url.searchParams.get("path") ?? "";
+      const maxCount = parseInt(url.searchParams.get("max") ?? "50", 10);
+      if (!path) return Response.json({ error: "path is required" }, { status: 400 });
+      const commits = await porcelain.fileLog(ref, path, maxCount);
+      return Response.json({ commits });
+    }
+
+    // --- contributors ---
+    case "contributors": {
+      const contributors = porcelain.contributors();
+      return Response.json({ contributors });
+    }
+
+    // --- repo stats ---
+    case "stats": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const stats = await porcelain.stats(ref);
+      return Response.json(stats);
+    }
+
+    // --- repo metadata ---
+    case "get-meta": {
+      const meta = engine.getRepoMeta();
+      if (!meta) return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json(meta);
+    }
+
+    case "update-meta": {
+      const body = await request.json() as Record<string, string>;
+      engine.updateRepoMeta(body);
+      return Response.json({ ok: true });
+    }
+
     // --- show object ---
     case "show": {
       const sha = url.searchParams.get("sha") ?? "";

@@ -27,6 +27,38 @@ Repos are discovered from R2 object prefixes, so only repos with at least one co
 
 ## Repository
 
+### Get Metadata
+
+```http
+GET /api/repos/:owner/:repo
+```
+
+Returns repository metadata:
+
+```json
+{
+  "owner": "alice",
+  "name": "project-a",
+  "description": "My project",
+  "visibility": "public",
+  "default_branch": "main",
+  "created_at": "2025-01-01T00:00:00.000Z",
+  "updated_at": "2025-06-01T00:00:00.000Z"
+}
+```
+
+### Update Metadata
+
+```http
+PATCH /api/repos/:owner/:repo
+```
+
+```json
+{ "description": "Updated description", "visibility": "private" }
+```
+
+Updatable fields: `description`, `visibility`, `default_branch`.
+
 ### Initialize
 
 ```http
@@ -111,13 +143,42 @@ POST /api/repos/:owner/:repo/commits
 
 Set `content` to `null` to delete a file. Returns `{ "sha": "abc..." }`.
 
+### Get Commit
+
+```http
+GET /api/repos/:owner/:repo/commits/:sha
+```
+
+Returns structured data for a single commit:
+
+```json
+{
+  "sha": "abc...",
+  "tree": "def...",
+  "parents": ["ghi..."],
+  "author": "Alice",
+  "authorEmail": "alice@example.com",
+  "authorTimestamp": 1700000000,
+  "committer": "Alice",
+  "committerEmail": "alice@example.com",
+  "committerTimestamp": 1700000000,
+  "message": "Add feature\n"
+}
+```
+
 ### Log
 
 ```http
 GET /api/repos/:owner/:repo/log?ref=main&max=50
 ```
 
-Returns commit history walking from the given ref:
+Returns commit history walking from the given ref. Add `&path=src/index.ts` to filter to commits that changed a specific file:
+
+```http
+GET /api/repos/:owner/:repo/log?ref=main&path=src/index.ts
+```
+
+Full log response:
 
 ```json
 {
@@ -359,6 +420,43 @@ Resolves a ref to a commit SHA. Supports: branch names, tag names, `HEAD`, `HEAD
 ```json
 { "sha": "abc..." }
 ```
+
+## Contributors
+
+```http
+GET /api/repos/:owner/:repo/contributors
+```
+
+Aggregates author statistics from the commit index:
+
+```json
+{
+  "contributors": [
+    { "name": "Alice <alice@example.com>", "commits": 42, "lastCommit": 1700000000 },
+    { "name": "Bob <bob@example.com>", "commits": 17, "lastCommit": 1699000000 }
+  ]
+}
+```
+
+## Stats
+
+```http
+GET /api/repos/:owner/:repo/stats?ref=main
+```
+
+Returns repository statistics:
+
+```json
+{
+  "commits": 42,
+  "branches": 3,
+  "tags": 5,
+  "files": 28,
+  "size": 145920
+}
+```
+
+`size` is total uncompressed file content in bytes.
 
 ## Show Object
 

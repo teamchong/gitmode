@@ -1399,6 +1399,58 @@ describe("REST API", () => {
     const data = await resp.json() as any;
     expect(data.error).toContain("Cannot delete");
   });
+
+  it("GET /commits/:sha returns structured commit data", async () => {
+    const log = await apiJson("/log?ref=main&max=1");
+    const sha = log.commits[0].sha;
+    const data = await apiJson(`/commits/${sha}`);
+    expect(data.sha).toBe(sha);
+    expect(data.tree).toMatch(/^[0-9a-f]{40}$/);
+    expect(data.author).toBeTruthy();
+    expect(data.message).toBeTruthy();
+  });
+
+  it("GET /log?path= filters by file", async () => {
+    const data = await apiJson("/log?ref=main&path=cherry.txt");
+    expect(data.commits.length).toBeGreaterThan(0);
+    // All returned commits should involve cherry.txt
+    for (const c of data.commits) {
+      expect(c.sha).toMatch(/^[0-9a-f]{40}$/);
+    }
+  });
+
+  it("GET /contributors returns author stats", async () => {
+    const data = await apiJson("/contributors");
+    expect(data.contributors.length).toBeGreaterThan(0);
+    expect(data.contributors[0].name).toBeTruthy();
+    expect(data.contributors[0].commits).toBeGreaterThan(0);
+  });
+
+  it("GET /stats returns repository stats", async () => {
+    const data = await apiJson("/stats?ref=main");
+    expect(data.commits).toBeGreaterThan(0);
+    expect(data.branches).toBeGreaterThan(0);
+    expect(data.files).toBeGreaterThan(0);
+    expect(data.size).toBeGreaterThan(0);
+  });
+
+  it("GET / returns repo metadata", async () => {
+    const data = await apiJson("");
+    expect(data.owner).toBe("apitest");
+    expect(data.name).toBe("myrepo");
+    expect(data.default_branch).toBe("main");
+  });
+
+  it("PATCH / updates repo metadata", async () => {
+    const resp = await apiJson("", {
+      method: "PATCH",
+      body: JSON.stringify({ description: "My test repo", visibility: "private" }),
+    });
+    expect(resp.ok).toBe(true);
+    const meta = await apiJson("");
+    expect(meta.description).toBe("My test repo");
+    expect(meta.visibility).toBe("private");
+  });
 });
 
 // ============================================================

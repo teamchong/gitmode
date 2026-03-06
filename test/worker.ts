@@ -197,6 +197,16 @@ async function routeApi(
 ): Promise<Response> {
   const method = request.method;
 
+  // GET /  (repo metadata)
+  if (rest === "" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "get-meta");
+  }
+
+  // PATCH / (update repo metadata)
+  if (rest === "" && method === "PATCH") {
+    return sendApiAction(store, request, repoPath, "update-meta");
+  }
+
   if (rest === "init" && method === "POST") {
     return sendApiAction(store, request, repoPath, "init");
   }
@@ -212,9 +222,27 @@ async function routeApi(
   if (rest === "commits" && method === "POST") {
     return sendApiAction(store, request, repoPath, "commit");
   }
+  const commitMatch = rest.match(/^commits\/([0-9a-f]{40})$/);
+  if (commitMatch && method === "GET") {
+    const commitUrl = new URL(request.url);
+    commitUrl.searchParams.set("sha", commitMatch[1]);
+    return sendApiAction(store, new Request(commitUrl, request), repoPath, "get-commit");
+  }
 
   if (rest === "log" && method === "GET") {
+    const logUrl = new URL(request.url);
+    if (logUrl.searchParams.has("path")) {
+      return sendApiAction(store, request, repoPath, "file-log");
+    }
     return sendApiAction(store, request, repoPath, "log");
+  }
+
+  if (rest === "contributors" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "contributors");
+  }
+
+  if (rest === "stats" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "stats");
   }
 
   if (rest === "diff" && method === "GET") {
