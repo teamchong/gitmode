@@ -335,29 +335,50 @@ async function handleApiAction(
     // --- cherry-pick ---
     case "cherry-pick": {
       const body = await request.json() as {
-        commit: string; target: string;
-        author: string; email: string;
+        commit?: string; sha?: string;
+        target?: string; branch?: string;
+        author?: string; authorEmail?: string; email?: string;
         timestamp?: number;
       };
-      const sha = await porcelain.cherryPick(body);
+      const commit = body.commit ?? body.sha;
+      const target = body.target ?? body.branch;
+      const email = body.email ?? body.authorEmail ?? "";
+      if (!commit) throw new Error("Missing required field: commit (or sha)");
+      if (!target) throw new Error("Missing required field: target (or branch)");
+      if (!body.author) throw new Error("Missing required field: author");
+      const sha = await porcelain.cherryPick({ commit, target, author: body.author, email, timestamp: body.timestamp });
       return Response.json({ sha });
     }
 
     // --- revert ---
     case "revert": {
       const body = await request.json() as {
-        commit: string; target: string;
-        author: string; email: string;
+        commit?: string; sha?: string;
+        target?: string; branch?: string;
+        author?: string; authorEmail?: string; email?: string;
         timestamp?: number;
       };
-      const sha = await porcelain.revert(body);
+      const commit = body.commit ?? body.sha;
+      const target = body.target ?? body.branch;
+      const email = body.email ?? body.authorEmail ?? "";
+      if (!commit) throw new Error("Missing required field: commit (or sha)");
+      if (!target) throw new Error("Missing required field: target (or branch)");
+      if (!body.author) throw new Error("Missing required field: author");
+      const sha = await porcelain.revert({ commit, target, author: body.author, email, timestamp: body.timestamp });
       return Response.json({ sha });
     }
 
     // --- reset ---
     case "reset": {
-      const body = await request.json() as { ref: string; target: string };
-      await porcelain.reset(body.ref, body.target);
+      const body = await request.json() as {
+        ref?: string; branch?: string;
+        target?: string; sha?: string;
+      };
+      const ref = body.ref ?? body.branch;
+      const target = body.target ?? body.sha;
+      if (!ref) throw new Error("Missing required field: ref (or branch)");
+      if (!target) throw new Error("Missing required field: target (or sha)");
+      await porcelain.reset(ref, target);
       return Response.json({ ok: true });
     }
 
@@ -414,8 +435,12 @@ async function handleApiAction(
 
     // --- show object ---
     case "show": {
-      const sha = url.searchParams.get("sha") ?? "";
-      const obj = await engine.readObject(sha);
+      const ref = url.searchParams.get("sha") ?? url.searchParams.get("ref") ?? "";
+      if (!ref) return Response.json({ error: "ref or sha is required" }, { status: 400 });
+      // Resolve ref to SHA if needed
+      const resolved = await porcelain.resolveRef(ref);
+      if (!resolved) return Response.json({ error: "not found" }, { status: 404 });
+      const obj = await engine.readObject(resolved);
       if (!obj) return Response.json({ error: "not found" }, { status: 404 });
       const typeNames = ["", "blob", "tree", "commit", "tag"];
       return Response.json({

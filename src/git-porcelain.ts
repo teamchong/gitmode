@@ -735,10 +735,8 @@ export class GitPorcelain {
     files: number;
     size: number;
   }> {
-    const sql = (this.engine as any).sql as SqlStorage;
-    const commitCount = sql
-      ? ([...sql.exec("SELECT COUNT(*) as c FROM commits")][0]?.c as number ?? 0)
-      : 0;
+    // Walk the commit graph to get accurate count (SQLite index may be incomplete)
+    const allCommits = await this.log(ref, 10000);
     const branches = this.listBranches().length;
     const tags = (await this.listTags()).length;
 
@@ -751,7 +749,7 @@ export class GitPorcelain {
     }
 
     return {
-      commits: commitCount,
+      commits: allCommits.length,
       branches,
       tags,
       files: allFiles.length,

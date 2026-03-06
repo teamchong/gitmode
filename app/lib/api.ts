@@ -118,6 +118,27 @@ export async function getCommit(owner: string, repo: string, sha: string) {
   };
 }
 
+export async function getDiff(
+  owner: string,
+  repo: string,
+  from: string,
+  to?: string,
+) {
+  const params: Record<string, string> = { from };
+  if (to) params.to = to;
+  const resp = await doFetch(owner, repo, "diff", params);
+  if (!resp.ok) return [];
+  const data = (await resp.json()) as {
+    entries: Array<{
+      path: string;
+      status: "added" | "modified" | "deleted" | "renamed";
+      oldSha?: string;
+      newSha?: string;
+    }>;
+  };
+  return data.entries;
+}
+
 export async function getRepoMeta(owner: string, repo: string) {
   const resp = await doFetch(owner, repo, "get-meta");
   if (!resp.ok) return null;

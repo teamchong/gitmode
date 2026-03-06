@@ -111,13 +111,27 @@ export async function handleReceivePack(
     }
   }
 
-  // Materialize worktrees for successfully updated branch refs
+  // Ensure repo metadata exists
+  try {
+    engine.ensureRepo();
+  } catch {
+    // ignore if already exists
+  }
+
+  // Index new commits and materialize worktrees for updated branch refs
   if (env && repoPath) {
     for (const update of updates) {
       if (update.newSha === ZERO_SHA) continue;
       if (!update.refname.startsWith("refs/heads/")) continue;
       const resultLine = results.find((r) => r.startsWith(`ok ${update.refname}`));
       if (!resultLine) continue;
+
+      // Index commits between old and new SHA
+      try {
+        await indexNewCommits(engine, update.oldSha, update.newSha);
+      } catch (err) {
+        console.error(`commit indexing failed for ${update.refname}: ${err}`);
+      }
 
       const branch = update.refname.replace(/^refs\/heads\//, "");
       try {
@@ -160,4 +174,41 @@ export async function handleReceivePack(
       "Cache-Control": "no-cache",
     },
   });
+}
+
+/** Walk commits from newSha back to oldSha and index each one. */
+async function indexNewCommits(
+  engine: GitEngine,
+  oldSha: string,
+  newSha: string,
+): Promise<void> {
+  const visited = new Set<string>();
+  const queue = [newSha];
+  const stopAt = oldSha === ZERO_SHA ? null : oldSha;
+
+  while (queue.length > 0) {
+    const sha = queue.shift()!;
+    if (visited.has(sha)) continue;
+    if (stopAt && sha === stopAt) continue;
+    visited.add(sha);
+
+    const obj = await engine.readObject(sha);
+    if (!obj) continue;
+
+    // Parse the commit to extract author/message/timestamp
+    const raw = decoder.decode(obj.content);
+    const authorLine = raw.match(/^author (.+?) <(.+?)> (\d+)/m);
+    const msgStart = raw.indexOf("\n\n");
+    const message = msgStart >= 0 ? raw.slice(msgStart + 2).trim() : "";
+    const author = authorLine ? `${authorLine[1]} <${authorLine[2]}>` : "unknown";
+    const timestamp = authorLine ? parseInt(authorLine[3], 10) : 0;
+
+    engine.indexCommit(sha, author, message, timestamp);
+
+    // Walk parents
+    const parentMatches = raw.matchAll(/^parent ([0-9a-f]{40})/gm);
+    for (const m of parentMatches) {
+      queue.push(m[1]);
+    }
+  }
 }

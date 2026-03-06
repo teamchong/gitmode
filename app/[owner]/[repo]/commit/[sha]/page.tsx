@@ -1,4 +1,4 @@
-import { getCommit } from "../../../../lib/api";
+import { getCommit, getDiff } from "../../../../lib/api";
 
 export default async function CommitPage({
   params,
@@ -7,9 +7,13 @@ export default async function CommitPage({
 }) {
   const { owner, repo, sha } = await params;
   let commit: Awaited<ReturnType<typeof getCommit>> = null;
+  let diffEntries: Awaited<ReturnType<typeof getDiff>> = [];
 
   try {
     commit = await getCommit(owner, repo, sha);
+    if (commit) {
+      diffEntries = await getDiff(owner, repo, sha);
+    }
   } catch {
     // env not available
   }
@@ -26,6 +30,10 @@ export default async function CommitPage({
   const date = new Date(ts);
   const [subject, ...bodyLines] = commit.message.split("\n");
   const body = bodyLines.join("\n").trim();
+
+  const added = diffEntries.filter(e => e.status === "added").length;
+  const modified = diffEntries.filter(e => e.status === "modified").length;
+  const deleted = diffEntries.filter(e => e.status === "deleted").length;
 
   return (
     <div>
@@ -77,6 +85,47 @@ export default async function CommitPage({
           )}
         </div>
       </div>
+
+      {diffEntries.length > 0 && (
+        <div>
+          <div style={{
+            fontSize: "12px",
+            color: "var(--text-secondary)",
+            padding: "8px 0",
+            borderBottom: "1px solid var(--border)",
+            marginBottom: "8px",
+          }}>
+            Showing {diffEntries.length} changed file{diffEntries.length !== 1 ? "s" : ""}
+            {added > 0 && <span style={{ color: "#3fb950" }}> +{added}</span>}
+            {modified > 0 && <span style={{ color: "#d29922" }}> ~{modified}</span>}
+            {deleted > 0 && <span style={{ color: "#f85149" }}> -{deleted}</span>}
+          </div>
+          <table>
+            <tbody>
+              {diffEntries.map((entry) => (
+                <tr key={entry.path}>
+                  <td style={{ width: 24, textAlign: "center" }}>
+                    <span style={{
+                      color: entry.status === "added" ? "#3fb950"
+                        : entry.status === "deleted" ? "#f85149"
+                        : "#d29922",
+                      fontSize: "12px",
+                      fontWeight: "bold",
+                    }}>
+                      {entry.status === "added" ? "A" : entry.status === "deleted" ? "D" : "M"}
+                    </span>
+                  </td>
+                  <td>
+                    <a href={`/${owner}/${repo}/blob/${sha}/${entry.path}`}>
+                      {entry.path}
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

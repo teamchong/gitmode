@@ -1,3 +1,6 @@
+import { getRepoMeta } from "../../lib/api";
+import { TabLink } from "./tab-link";
+
 export default async function RepoLayout({
   children,
   params,
@@ -6,6 +9,14 @@ export default async function RepoLayout({
   params: Promise<{ owner: string; repo: string }>;
 }) {
   const { owner, repo } = await params;
+
+  let defaultBranch = "main";
+  try {
+    const meta = await getRepoMeta(owner, repo);
+    if (meta?.default_branch) defaultBranch = meta.default_branch;
+  } catch {
+    // meta not available
+  }
 
   return (
     <div>
@@ -26,27 +37,12 @@ export default async function RepoLayout({
         marginBottom: "1rem",
       }}>
         <TabLink href={`/${owner}/${repo}`}>Code</TabLink>
-        <TabLink href={`/${owner}/${repo}/commits/main`}>Commits</TabLink>
+        <TabLink href={`/${owner}/${repo}/commits/${defaultBranch}`}>Commits</TabLink>
         <TabLink href={`/${owner}/${repo}/branches`}>Branches</TabLink>
         <TabLink href={`/${owner}/${repo}/tags`}>Tags</TabLink>
       </nav>
 
       {children}
     </div>
-  );
-}
-
-function TabLink({ href, children }: { href: string; children: React.ReactNode }) {
-  return (
-    <a
-      href={href}
-      style={{
-        padding: "8px 16px",
-        color: "var(--text-secondary)",
-        borderBottom: "2px solid transparent",
-      }}
-    >
-      {children}
-    </a>
   );
 }

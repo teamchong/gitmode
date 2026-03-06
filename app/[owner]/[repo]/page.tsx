@@ -1,6 +1,33 @@
 import { getEnv } from "../../lib/env";
 import { getRepoMeta } from "../../lib/api";
 
+function renderMarkdown(md: string): string {
+  const escaped = md
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return escaped
+    .split("\n")
+    .map((line) => {
+      // Headings
+      if (line.startsWith("### ")) return `<h3>${line.slice(4)}</h3>`;
+      if (line.startsWith("## ")) return `<h2>${line.slice(3)}</h2>`;
+      if (line.startsWith("# ")) return `<h1>${line.slice(2)}</h1>`;
+      // Code blocks (inline)
+      let processed = line.replace(/`([^`]+)`/g, '<code style="background:var(--bg-secondary);padding:2px 6px;border-radius:3px">$1</code>');
+      // Bold
+      processed = processed.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      // Italic
+      processed = processed.replace(/\*(.+?)\*/g, "<em>$1</em>");
+      // Links
+      processed = processed.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+      // Empty lines = paragraph break
+      if (processed.trim() === "") return "<br/>";
+      return `<p style="margin:0.25em 0">${processed}</p>`;
+    })
+    .join("\n");
+}
+
 interface TreeEntry {
   name: string;
   isDir: boolean;
@@ -105,9 +132,10 @@ export default async function RepoOverview({
               }}>
                 README
               </h3>
-              <pre style={{ padding: "1rem", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {readme}
-              </pre>
+              <div
+                style={{ padding: "1rem", lineHeight: 1.6 }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(readme) }}
+              />
             </div>
           )}
         </>
