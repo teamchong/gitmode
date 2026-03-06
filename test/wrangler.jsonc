@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "gitmode-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "r2_buckets": [
+    { "binding": "OBJECTS", "bucket_name": "gitmode-objects-test" }
+  ],
+
+  "kv_namespaces": [
+    { "binding": "REFS", "id": "gitmode-refs-test" }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "META",
+      "database_name": "gitmode-meta-test",
+      "database_id": "gitmode-meta-test"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "REPO_LOCK", "class_name": "RepoLock" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_classes": ["RepoLock"] }
+  ],
+
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": false
+    }
+  ]
+}

@@ -1,8 +1,10 @@
 # gitmode
 
+> **⚠️ Experimental** — This project is a proof-of-concept and under active development. APIs, storage layout, and functionality may change without notice. Not recommended for production use.
+
 Git server running entirely on Cloudflare Workers. No VMs, no servers — just Workers + R2 + KV + D1.
 
-The git protocol engine is written in Zig, compiled to WASM with SIMD128 acceleration for SHA-1 hashing, delta compression, and packfile operations.
+The git protocol engine is written in Zig, compiled to WASM with SIMD128 acceleration for SHA-1 hashing, delta compression, and packfile operations. libgit2 is statically linked for advanced operations (diff, blame, revwalk).
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/user/gitmode)
 
@@ -47,12 +49,13 @@ git push -u origin main
 git client ──HTTPS──> Cloudflare Worker (TypeScript router)
                            │
                            ▼
-                      Zig WASM Engine (936K)
+                      Zig WASM Engine (1.2MB)
                       ├─ SHA-1 hashing (SIMD128)
                       ├─ Packfile encode/decode
                       ├─ Delta compression (SIMD matching)
                       ├─ Zlib inflate/deflate
-                      └─ Git object serialization
+                      ├─ Git object serialization
+                      └─ libgit2 (diff, blame, revwalk)
                            │
                     ┌──────┼──────────┐
                     ▼      ▼          ▼
@@ -88,6 +91,9 @@ Git's hot paths are CPU-bound binary operations — SHA-1 hashing, zlib decompre
 | Branches and tags | Supported |
 | Delta compression (ofs-delta, ref-delta) | Supported |
 | Packfile v2 | Supported |
+| Diff (via libgit2) | Supported |
+| Blame (via libgit2) | Supported |
+| Commit history / revwalk (via libgit2) | Supported |
 | Shallow clone (`--depth`) | Planned |
 | SSH transport | Planned |
 | Git LFS | Planned (R2 backend) |
@@ -114,7 +120,7 @@ pnpm run deploy
 ```
 gitmode/
 ├── wasm/                    Zig WASM engine
-│   ├── build.zig            wasm32-freestanding + SIMD128
+│   ├── build.zig            wasm32-wasi + SIMD128
 │   └── src/
 │       ├── main.zig         Exported WASM functions
 │       ├── sha1.zig         SHA-1 implementation
@@ -123,7 +129,13 @@ gitmode/
 │       ├── delta.zig        Delta compression
 │       ├── zlib.zig         Inflate/deflate
 │       ├── protocol.zig     pkt-line framing
-│       └── simd.zig         SIMD128 memory ops
+│       ├── simd.zig         SIMD128 memory ops
+│       └── libgit2.zig      libgit2 bindings (diff, blame, revwalk)
+├── wasm/libgit2-wasm/       libgit2 compiled to WASM
+│   ├── build.sh             Cross-compile with zig cc
+│   ├── posix_shim.c         POSIX → R2/KV host imports
+│   └── wasm_platform.c      WASM platform layer
+├── deps/libgit2/            libgit2 source (submodule)
 ├── src/
 │   ├── worker.ts            Worker entry point
 │   ├── git-engine.ts        R2 + KV + D1 orchestration

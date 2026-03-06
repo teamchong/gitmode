@@ -15,6 +15,6 @@
     "allowImportingTsExtensions": true,
     "outDir": "dist"
   },
-  "include": ["src", "app", "worker"],
+  "include": ["src", "app", "worker", "test"],
   "exclude": ["node_modules"]
 }

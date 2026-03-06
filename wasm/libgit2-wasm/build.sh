@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build libgit2 as a static library for wasm32-freestanding using zig cc
+# Build libgit2 as a static library for wasm32-wasi using zig cc
+# Uses WASI target for libc headers (sys/types.h, string.h, etc.)
+# Actual I/O is handled by host imports, not WASI syscalls
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,13 +14,16 @@ mkdir -p "$OUT/obj"
 
 CC="zig cc"
 AR="zig ar"
-TARGET="--target=wasm32-freestanding"
+TARGET="--target=wasm32-wasi"
 
 CFLAGS=(
     $TARGET
     -O2
     -DWASM_BUILD=1
     -D_GNU_SOURCE
+    -D_WASI_EMULATED_SIGNAL
+    -D_WASI_EMULATED_MMAN
+    -D_WASI_EMULATED_PROCESS_CLOCKS
 
     # libgit2 feature flags — minimal config for WASM
     -DGIT_SHA1_BUILTIN=1
@@ -31,16 +36,19 @@ CFLAGS=(
     '-DSHA1DC_CUSTOM_INCLUDE_SHA1_C="git2_util.h"'
     '-DSHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C="git2_util.h"'
 
+    # pcre config
+    -DHAVE_CONFIG_H
+
     # Disable features that need OS support
     -DNO_MMAP
-    -DNO_ADDRINFO
+    -DGIT_IO_SELECT=1
 
-    # Include paths
+    # Include paths (our shim dir first to override headers)
+    -I"$OUT"
     -I"$SHIM"
     -I"$LIBGIT2/include"
     -I"$LIBGIT2/src/util"
     -I"$LIBGIT2/src/libgit2"
-    -I"$OUT"
     -I"$LIBGIT2/deps/pcre"
     -I"$LIBGIT2/deps/zlib"
     -I"$LIBGIT2/deps/xdiff"
@@ -54,14 +62,13 @@ CFLAGS=(
     -Wno-implicit-int
     -Wno-unused-parameter
     -Wno-sign-compare
-
-    # freestanding
-    -ffreestanding
-    -nostdlib
 )
 
 # Copy our features header where libgit2 expects it
 cp "$SHIM/git2_features.h" "$OUT/git2_features.h"
+
+# Generate pcre config.h in the pcre source directory
+cp "$SHIM/pcre_config.h" "$LIBGIT2/deps/pcre/config.h"
 
 echo "=== Compiling libgit2 for wasm32 ==="
 
@@ -98,11 +105,16 @@ done
 
 echo "--- util ---"
 for f in "$LIBGIT2"/src/util/*.c; do
+    # Skip posix.c — our posix_shim.c provides WASM-compatible replacements
+    case "$(basename "$f")" in
+        posix.c) continue ;;
+    esac
     compile_file "$f"
 done
 
-# util allocators (stdalloc only, no debug/win32)
+# util allocators
 compile_file "$LIBGIT2/src/util/allocators/stdalloc.c"
+compile_file "$LIBGIT2/src/util/allocators/failalloc.c"
 
 # SHA1 — collision-detecting builtin
 echo "--- sha1 (collision-detect) ---"
@@ -118,11 +130,9 @@ for f in "$LIBGIT2"/src/util/hash/rfc6234/*.c; do
     compile_file "$f"
 done
 
-# Unix platform shims (our custom versions will override at link time)
+# Unix platform — only realpath (skip process.c and map.c which need signals/mmap)
 echo "--- unix platform ---"
-for f in "$LIBGIT2"/src/util/unix/*.c; do
-    compile_file "$f"
-done
+compile_file "$LIBGIT2/src/util/unix/realpath.c"
 
 # === libgit2 core ===
 
@@ -142,9 +152,10 @@ compile_file "$LIBGIT2/src/libgit2/transports/credential_helpers.c"
 echo "--- streams (registry only) ---"
 compile_file "$LIBGIT2/src/libgit2/streams/registry.c"
 
-# === POSIX shim ===
+# === POSIX shim and WASM platform layer ===
 echo "--- posix shim ---"
 compile_file "$SHIM/posix_shim.c"
+compile_file "$SHIM/wasm_platform.c"
 
 # === Archive ===
 

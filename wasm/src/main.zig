@@ -18,6 +18,16 @@ const protocol = @import("protocol.zig");
 const simd = @import("simd.zig");
 const r2_backend = @import("r2_backend.zig");
 const checkout = @import("checkout.zig");
+const libgit2 = @import("libgit2.zig");
+
+// Force libgit2 exports to be included in the WASM binary
+comptime {
+    _ = &libgit2.libgit2_init;
+    _ = &libgit2.libgit2_shutdown;
+    _ = &libgit2.libgit2_diff;
+    _ = &libgit2.libgit2_revwalk;
+    _ = &libgit2.libgit2_blame;
+}
 
 // ============================================================
 // Host imports — provided by the TypeScript Worker
@@ -312,4 +322,5 @@ test {
     _ = simd;
     _ = r2_backend;
     _ = checkout;
+    _ = libgit2;
 }

@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     // === WASM target for Cloudflare Workers ===
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
-        .os_tag = .freestanding,
+        .os_tag = .wasi,
         .cpu_features_add = std.Target.wasm.featureSet(&.{.simd128}),
     });
 
@@ -18,13 +18,18 @@ pub fn build(b: *std.Build) void {
             .optimize = if (optimize == .Debug) .Debug else .ReleaseSmall,
             .strip = optimize != .Debug,
             .unwind_tables = .none,
+            .link_libc = true,
         }),
     });
 
     wasm.entry = .disabled;
     wasm.rdynamic = true;
-    // Stack size: 1MB (git operations can be recursive for tree walking)
-    wasm.stack_size = 1024 * 1024;
+    // Stack size: 4MB (libgit2 operations can be deeply recursive)
+    wasm.stack_size = 4 * 1024 * 1024;
+
+    // Link libgit2 static library (compiled with zig cc for wasm32-wasi)
+    wasm.addObjectFile(b.path("libgit2-wasm/out/libgit2.a"));
+    wasm.addIncludePath(b.path("../deps/libgit2/include"));
 
     const install_wasm = b.addInstallArtifact(wasm, .{});
 

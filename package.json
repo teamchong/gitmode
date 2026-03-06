@@ -11,11 +11,17 @@
     "preview": "vite preview",
     "deploy": "pnpm run build && wrangler deploy",
     "test:zig": "cd wasm && zig build test",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:init": "wrangler d1 execute gitmode-meta --file=src/schema.sql"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.20",
     "@cloudflare/workers-types": "^4.20250301.0",
+    "@vitest/runner": "~3.2.4",
+    "@vitest/snapshot": "~3.2.4",
     "typescript": "^5.7.0",
+    "vitest": "^3.2.4",
     "wrangler": "^4.71.0"
   },
   "dependencies": {

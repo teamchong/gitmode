@@ -1,12 +1,15 @@
-// POSIX shim for wasm32-freestanding
+// POSIX shim for wasm32-wasi
 // Implements the POSIX interface that libgit2 needs,
 // redirecting all I/O to host imports (R2/KV via TypeScript).
 
 #include "posix_shim.h"
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
-#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 // === File operations — delegated to host ===
 
@@ -112,26 +115,37 @@ int p_getcwd(char *buf, size_t size) {
     return 0;
 }
 
+// git_map — libgit2's memory-mapped file abstraction
+typedef struct {
+    void *data;
+    size_t len;
+} git_map;
+
+typedef long long off64_t;
+
 // mmap: allocate memory and read entire object into it.
 // R2 objects are accessed as whole blobs, so this loads the full content.
-void *p_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    (void)addr;
+int p_mmap(git_map *out, size_t length, int prot, int flags, int fd, off64_t offset) {
     (void)prot;
     (void)flags;
     (void)offset;
     void *buf = malloc(length);
-    if (!buf) return (void *)-1;
+    if (!buf) return -1;
     ssize_t n = p_read(fd, buf, length);
     if (n < 0) {
         free(buf);
-        return (void *)-1;
+        return -1;
     }
-    return buf;
+    out->data = buf;
+    out->len = (size_t)n;
+    return 0;
 }
 
-int p_munmap(void *addr, size_t length) {
-    (void)length;
-    free(addr);
+int p_munmap(git_map *map) {
+    if (map && map->data) {
+        free(map->data);
+        map->data = NULL;
+    }
     return 0;
 }
 
@@ -178,3 +192,9 @@ unsigned int p_sleep(unsigned int seconds) {
 
 // Global fsync counter used by libgit2 for testing.
 size_t p_fsync__cnt = 0;
+
+// Page size — WASM uses 64KB pages
+int git__page_size(size_t *page_size) {
+    *page_size = 65536;
+    return 0;
+}
