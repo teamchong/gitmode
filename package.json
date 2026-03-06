@@ -4,6 +4,7 @@
   "private": true,
   "description": "Git server on Cloudflare Workers — Zig WASM engine with SIMD",
   "type": "module",
+  "packageManager": "pnpm@10.21.0",
   "scripts": {
     "build:wasm": "cd wasm && zig build wasm -Doptimize=ReleaseSmall && mkdir -p ../src/wasm && wasm-metadce --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --graph-file exports.json zig-out/bin/gitmode.wasm -o ../src/wasm/gitmode.dce.wasm && wasm-opt -Oz --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int ../src/wasm/gitmode.dce.wasm -o ../src/wasm/gitmode.wasm && rm ../src/wasm/gitmode.dce.wasm",
     "build": "vite build",

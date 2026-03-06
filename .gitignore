@@ -14,3 +14,5 @@ wrangler.toml.bak
 docs/node_modules/
 docs/dist/
 docs/.astro/
+ssh/host_key
+ssh/host_key.pub

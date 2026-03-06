@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  repository_dispatch:
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -12,6 +12,8 @@ jobs:
     name: Deploy
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -19,7 +21,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -31,20 +33,13 @@ jobs:
       - name: Build WASM
         run: pnpm run build:wasm
 
-      - name: Provision resources
-        uses: cloudflare/wrangler-action@v3
-        with:
-          command: |
-            d1 create gitmode-meta --json || true
-            r2 bucket create gitmode-objects || true
-            kv namespace create gitmode-refs || true
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Build
+        run: pnpm run build
 
-      - name: Initialize database
+      - name: Provision R2 bucket
         uses: cloudflare/wrangler-action@v3
         with:
-          command: d1 execute gitmode-meta --file=src/schema.sql
+          command: r2 bucket create gitmode-objects || true
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
