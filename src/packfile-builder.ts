@@ -67,8 +67,10 @@ export async function buildPackfile(
     offset += obj.compressed.length;
   }
 
-  // Trailer: SHA-1 of pack content
-  const digest = wasm.sha1(pack.slice(0, offset));
+  // Trailer: SHA-1 of pack content (use crypto API to avoid copying
+  // the entire packfile into the 32MB WASM arena)
+  const hashBuf = await crypto.subtle.digest("SHA-1", pack.slice(0, offset));
+  const digest = new Uint8Array(hashBuf);
   pack.set(digest, offset);
   offset += 20;
 

@@ -55,7 +55,7 @@ const Heap = struct {
     buf: [heap_size]u8 = undefined,
     offset: usize = 0,
 
-    const heap_size = 32 * 1024 * 1024; // 32MB
+    const heap_size = 64 * 1024 * 1024; // 64MB
 
     fn alloc(self: *Heap, size: usize) ?[*]u8 {
         const aligned = std.mem.alignForward(usize, size, 16);

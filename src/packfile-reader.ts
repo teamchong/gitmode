@@ -95,10 +95,28 @@ export async function unpackPackfile(
       offset += bytesRead;
     }
 
-    // Decompress zlib data
-    const maxDecompressed = Math.max(size * 2, 65536);
-    const remaining = packData.slice(offset);
-    const { data: decompressed, consumed } = wasm.zlibInflateTracked(remaining, maxDecompressed);
+    // Decompress zlib data — pass a bounded slice to avoid copying the entire
+    // remaining packfile into the WASM arena. Cap input at decompressed
+    // size + overhead (compressed is always smaller for real data, but zlib
+    // stored blocks can be slightly larger, so add generous margin).
+    const maxDecompressed = Math.max(size * 4, 65536);
+    // Pass enough compressed input — for stored blocks (level 0), compressed can
+    // be slightly larger than decompressed due to block headers. Use remaining
+    // packfile but cap at WASM arena limit to prevent OOM.
+    const inputCap = Math.min(packData.length - offset, 30 * 1024 * 1024);
+    const compressedSlice = packData.subarray(offset, offset + inputCap);
+    let decompressed: Uint8Array;
+    let consumed: number;
+    try {
+      const result = wasm.zlibInflateTracked(compressedSlice, maxDecompressed);
+      decompressed = result.data;
+      consumed = result.consumed;
+    } catch {
+      // Zig flate can fail on certain deflate streams — fallback to node:zlib
+      const result = await jsInflateTracked(packData, offset, size);
+      decompressed = result.data;
+      consumed = result.consumed;
+    }
     offset += consumed;
 
     if (type === PACK_OBJ_REF_DELTA && baseRef) {
@@ -148,6 +166,46 @@ export async function unpackPackfile(
     cache.set(obj.sha1Hex, { type: obj.type, data: obj.data });
   }
   return cache;
+}
+
+/**
+ * JS-based zlib inflate fallback using node:zlib (available via nodejs_compat).
+ * Only invoked when the WASM decompressor fails on a specific deflate stream.
+ *
+ * Uses node:zlib.createInflate which handles trailing bytes gracefully and
+ * tracks exact consumed byte count via bytesWritten.
+ */
+async function jsInflateTracked(
+  packData: Uint8Array,
+  offset: number,
+  expectedSize: number,
+): Promise<{ data: Uint8Array; consumed: number }> {
+  const { createInflate } = await import("node:zlib");
+
+  // Feed generous input — createInflate handles trailing bytes correctly
+  const inputLen = Math.min(packData.length - offset, expectedSize + 4096);
+  const input = packData.subarray(offset, offset + inputLen);
+
+  const inflate = createInflate();
+  const chunks: Buffer[] = [];
+
+  const result = await new Promise<{ data: Uint8Array; consumed: number }>((resolve, reject) => {
+    inflate.on("data", (chunk: Buffer) => chunks.push(chunk));
+    inflate.on("end", () => {
+      const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+      const data = new Uint8Array(totalLen);
+      let pos = 0;
+      for (const c of chunks) {
+        data.set(c, pos);
+        pos += c.length;
+      }
+      resolve({ data, consumed: inflate.bytesWritten });
+    });
+    inflate.on("error", reject);
+    inflate.end(Buffer.from(input));
+  });
+
+  return result;
 }
 
 function readUint32BE(buf: Uint8Array, offset: number): number {
