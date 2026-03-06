@@ -20,6 +20,7 @@ export default defineConfig({
         { label: "Architecture", slug: "architecture" },
         { label: "REST API", slug: "rest-api" },
         { label: "Git Protocol", slug: "git-protocol" },
+        { label: "SSH Transport", slug: "ssh-transport" },
         { label: "WASM Engine", slug: "wasm-engine" },
         { label: "Deployment", slug: "deployment" },
       ],

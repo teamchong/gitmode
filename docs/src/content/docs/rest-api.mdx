@@ -218,13 +218,14 @@ POST /api/repos/:owner/:repo/tags
 ```json
 {
   "name": "v2.0",
+  "target": "main",
   "tagger": "Alice",
   "email": "alice@example.com",
   "message": "Release v2.0"
 }
 ```
 
-If `message` is present, an annotated tag object is created.
+If `message` is present, an annotated tag object is created. `target` resolves a ref or SHA to the commit being tagged (defaults to HEAD).
 
 ### Delete Tag
 

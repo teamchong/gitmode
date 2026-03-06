@@ -1,0 +1,109 @@
+---
+title: SSH Transport
+description: Git over SSH via the SSH-to-HTTP proxy.
+---
+
+Cloudflare Workers only accept HTTP requests, so gitmode includes an **SSH-to-HTTP proxy** that translates git SSH commands into HTTP requests to the Worker.
+
+## Architecture
+
+```
+Git Client ──SSH──▶ SSH Proxy (Node.js) ──HTTP──▶ Cloudflare Worker
+                    localhost:2222                localhost:8787
+```
+
+The proxy:
+
+1. Accepts SSH connections and authenticates all clients (no auth in dev mode)
+2. Parses the git exec command (`git-upload-pack` or `git-receive-pack`)
+3. Fetches ref advertisement from the Worker's HTTP endpoint
+4. Strips the HTTP service announcement wrapper (SSH protocol doesn't use it)
+5. Streams data between the git client and Worker, translating between SSH's bidirectional stream and HTTP request/response
+
+## Usage
+
+### Start the Proxy
+
+```bash
+# Start the dev server first
+pnpm run dev
+
+# Start the SSH proxy (default: port 2222, forwarding to http://localhost:8787)
+pnpm run ssh:proxy
+
+# Or with custom ports
+npx tsx ssh/proxy.ts --port 2222 --http http://localhost:8787
+```
+
+The proxy auto-generates an ed25519 host key on first run (stored at `ssh/host_key`).
+
+### Git Operations
+
+```bash
+# Clone
+git clone ssh://git@localhost:2222/owner/repo.git
+
+# Push
+cd repo
+echo "hello" > file.txt
+git add file.txt && git commit -m "add file"
+git push
+
+# Fetch
+git fetch
+
+# Branch operations
+git checkout -b feature
+git push -u origin feature
+git push origin --delete feature
+
+# Tags
+git tag v1.0
+git tag -a v2.0 -m "Release v2.0"
+git push --tags
+
+# ls-remote
+git ls-remote ssh://git@localhost:2222/owner/repo.git
+```
+
+## Protocol Details
+
+### Clone/Fetch (upload-pack)
+
+1. Proxy sends `GET /owner/repo.git/info/refs?service=git-upload-pack` to Worker
+2. Strips the HTTP service announcement (`# service=git-upload-pack\n` + flush)
+3. Sends raw ref advertisement to git client over SSH
+4. Reads client "want" and "have" lines until `done\n`
+5. Forwards to `POST /owner/repo.git/git-upload-pack`
+6. Sends packfile response back to client
+
+### Push (receive-pack)
+
+1. Proxy sends `GET /owner/repo.git/info/refs?service=git-receive-pack` to Worker
+2. Strips HTTP service announcement, sends refs to client
+3. Reads client ref-update pkt-lines until flush (`0000`)
+4. Detects whether a packfile follows:
+   - If next 4 bytes are `PACK` → reads until EOF (regular push)
+   - If no data within 200ms → delete-only push (no packfile)
+5. Forwards everything to `POST /owner/repo.git/git-receive-pack`
+6. Sends sideband-wrapped response back to client
+
+### Sideband Passthrough
+
+The git client advertises `side-band-64k` capability over SSH. The proxy preserves this — it forwards the capability to the HTTP server and passes sideband-wrapped responses back unchanged. This means progress messages and error reporting work correctly.
+
+## Conformance Tests
+
+The SSH transport is covered by 27 conformance tests:
+
+```bash
+pnpm run test:ssh
+```
+
+Tests cover: clone, push, incremental push, fetch, branch create/delete, lightweight tags, annotated tags, `push --tags`, ls-remote, 64KB binary file roundtrip, nested directories, repo isolation, and SSH/HTTP interop.
+
+## Limitations
+
+- **Development only** — The proxy runs as a standalone Node.js process. It cannot run on Cloudflare Workers (no inbound TCP).
+- **No authentication** — All SSH connections are accepted. Add authentication by checking the public key in the `authentication` event handler in `ssh/proxy.ts`.
+- **Single server** — The proxy is a single process. For production SSH support, you'd need a proper SSH server (e.g., on a VM) proxying to the deployed Worker.

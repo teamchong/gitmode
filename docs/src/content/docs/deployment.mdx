@@ -16,8 +16,9 @@ Your `wrangler.jsonc` should include:
 ```jsonc
 {
   "name": "gitmode",
-  "main": "src/worker.ts",
-  "compatibility_date": "2025-01-01",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
   "r2_buckets": [
     {
       "binding": "OBJECTS",
@@ -37,6 +38,13 @@ Your `wrangler.jsonc` should include:
       "tag": "v1",
       "new_sqlite_classes": ["RepoStore"]
     }
+  ],
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": false
+    }
   ]
 }
 ```
@@ -47,7 +55,7 @@ Your `wrangler.jsonc` should include:
 # Build WASM (if not already built)
 pnpm run build:wasm
 
-# Deploy to Cloudflare
+# Build frontend + deploy to Cloudflare
 pnpm run deploy
 ```
 
@@ -113,13 +121,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm run build:wasm
+      - run: pnpm run build
       - run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 ```
+
+Note: `pnpm/action-setup@v4` reads the pnpm version from the `packageManager` field in `package.json`.

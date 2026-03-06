@@ -6,7 +6,7 @@ description: Set up and deploy gitmode.
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 22+
-- [pnpm](https://pnpm.io/)
+- [pnpm](https://pnpm.io/installation)
 - [Zig](https://ziglang.org/) 0.15+ (for WASM builds)
 - [Binaryen](https://github.com/WebAssembly/binaryen) (`wasm-opt`, `wasm-metadce`)
 - A [Cloudflare](https://cloudflare.com) account with Workers, R2, and Durable Objects
@@ -21,7 +21,7 @@ pnpm install
 
 ## Build WASM
 
-The Zig WASM module provides SHA-1, zlib, packfile parsing, and delta encoding:
+The Zig WASM module provides SHA-1, zlib, packfile parsing, and delta encoding. **You must build the WASM module before running the dev server or tests.**
 
 ```bash
 pnpm run build:wasm
@@ -43,10 +43,7 @@ Then use git against the local server:
 # Initialize a repo via REST API
 curl -X POST http://localhost:8787/api/repos/myuser/myrepo/init
 
-# Clone (will be empty initially)
-git clone http://localhost:8787/myuser/myrepo.git
-
-# Or commit files via REST API
+# Commit files via REST API
 curl -X POST http://localhost:8787/api/repos/myuser/myrepo/commits \
   -H "Content-Type: application/json" \
   -d '{
@@ -56,16 +53,43 @@ curl -X POST http://localhost:8787/api/repos/myuser/myrepo/commits \
     "email": "you@example.com",
     "files": [{"path": "README.md", "content": "# My Repo"}]
   }'
+
+# Clone over HTTP
+git clone http://localhost:8787/myuser/myrepo.git
 ```
+
+### SSH Transport
+
+gitmode includes an SSH-to-HTTP proxy for `git clone ssh://...` support. Start it alongside the dev server:
+
+```bash
+# Terminal 1: dev server
+pnpm run dev
+
+# Terminal 2: SSH proxy (translates SSH → HTTP)
+pnpm run ssh:proxy
+```
+
+Then use SSH URLs:
+
+```bash
+git clone ssh://git@localhost:2222/myuser/myrepo.git
+git push  # works over SSH too
+```
+
+The proxy accepts all SSH connections without authentication (development mode). See [Git Protocol](/gitmode/git-protocol/) for protocol details.
 
 ## Testing
 
 ```bash
-# Unit + integration tests (vitest with miniflare)
+# Unit + integration tests (vitest with miniflare, 81 tests)
 pnpm test
 
-# Conformance tests with real git CLI
+# HTTP conformance tests with real git CLI
 pnpm run test:conformance
+
+# SSH conformance tests (clone, push, fetch, branches, tags, binary files)
+pnpm run test:ssh
 ```
 
 ## Deploy
@@ -74,4 +98,4 @@ pnpm run test:conformance
 pnpm run deploy
 ```
 
-Ensure your `wrangler.jsonc` has the R2 bucket and Durable Object bindings configured.
+Ensure your `wrangler.jsonc` has the R2 bucket and Durable Object bindings configured. See [Deployment](/gitmode/deployment/) for details.
