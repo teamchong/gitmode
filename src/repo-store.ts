@@ -306,8 +306,8 @@ async function handleApiAction(
 
     // --- diff ---
     case "diff": {
-      const refA = url.searchParams.get("a") ?? "";
-      const refB = url.searchParams.get("b") ?? undefined;
+      const refA = url.searchParams.get("a") ?? url.searchParams.get("from") ?? "";
+      const refB = url.searchParams.get("b") ?? url.searchParams.get("to") ?? undefined;
       const entries = await porcelain.diff(refA, refB);
       return Response.json({ entries });
     }

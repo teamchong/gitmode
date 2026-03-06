@@ -64,14 +64,26 @@ export async function handleUploadPack(
     return new Response(encodePktLine("ERR no wants\n"), { status: 400 });
   }
 
+  // Verify which haves the server actually knows about
+  let commonSha: string | null = null;
+  for (const sha of haves) {
+    const obj = await engine.readObject(sha);
+    if (obj) {
+      commonSha = sha;
+      break;
+    }
+  }
+
   // Collect all objects needed: walk from wants, stop at haves
   const needed = await collectObjects(engine, wants, haves);
 
   // Build packfile
   const packData = await buildPackfile(engine, needed);
 
-  // Response: NAK + packfile wrapped in sideband-64k
-  const nak = encodePktLine("NAK\n");
+  // Response: ACK (if common commits found) or NAK + packfile in sideband-64k
+  const ackOrNak = commonSha
+    ? encodePktLine(`ACK ${commonSha}\n`)
+    : encodePktLine("NAK\n");
 
   // Split packfile into sideband pkt-lines
   // Git LARGE_PACKET_MAX = 65520 total, minus 4 header, minus 1 channel byte = 65515
@@ -87,14 +99,14 @@ export async function handleUploadPack(
     packOffset += chunkLen;
   }
 
-  // Total: NAK + sideband pkt-lines + flush
-  const totalLen = nak.length
+  // Total: ACK/NAK + sideband pkt-lines + flush
+  const totalLen = ackOrNak.length
     + sidebandPkts.reduce((acc, p) => acc + p.length, 0)
     + FLUSH_PKT.length;
   const responseBody = new Uint8Array(totalLen);
   let pos = 0;
-  responseBody.set(nak, pos);
-  pos += nak.length;
+  responseBody.set(ackOrNak, pos);
+  pos += ackOrNak.length;
   for (const pkt of sidebandPkts) {
     responseBody.set(pkt, pos);
     pos += pkt.length;

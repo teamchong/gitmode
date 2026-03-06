@@ -14,7 +14,6 @@ import { encodePktLine, FLUSH_PKT } from "./pkt-line";
 const BASE_CAPABILITIES = [
   "report-status",
   "delete-refs",
-  "multi_ack_detailed",
   "side-band-64k",
   "thin-pack",
   "ofs-delta",

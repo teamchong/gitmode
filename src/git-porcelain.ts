@@ -232,6 +232,13 @@ export class GitPorcelain {
     files: Array<{ path: string; content: Uint8Array | string | null }>;
     timestamp?: number;
   }): Promise<string> {
+    // Auto-init: ensure repo metadata and HEAD exist so first commit works
+    // even without an explicit init call
+    this.engine.ensureRepo();
+    if (!this.engine.getHead()) {
+      this.engine.setHead("ref: refs/heads/main");
+    }
+
     const ts = opts.timestamp ?? Math.floor(Date.now() / 1000);
     const parentSha = await this.resolveRef(opts.ref);
 

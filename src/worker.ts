@@ -216,7 +216,7 @@ async function routeApi(
     return sendApiAction(store, request, repoPath, "log");
   }
 
-  // GET /diff?a=...&b=...
+  // GET /diff?a=...&b=... (or ?from=...&to=...)
   if (rest === "diff" && method === "GET") {
     return sendApiAction(store, request, repoPath, "diff");
   }
