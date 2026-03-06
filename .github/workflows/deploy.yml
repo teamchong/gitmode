@@ -38,9 +38,10 @@ jobs:
         run: pnpm run build:wasm
 
       - name: Provision R2 bucket
+        continue-on-error: true
         uses: cloudflare/wrangler-action@v3
         with:
-          command: r2 bucket create gitmode-objects || true
+          command: r2 bucket create gitmode-objects
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
