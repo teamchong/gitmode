@@ -1056,6 +1056,352 @@ describe("SSH command parsing", () => {
 });
 
 // ============================================================
+// REST API — Porcelain
+// ============================================================
+
+describe("REST API", () => {
+  const BASE = "http://localhost/api/repos/apitest/myrepo";
+
+  async function api(path: string, opts?: RequestInit) {
+    return SELF.fetch(`${BASE}${path}`, {
+      headers: { "content-type": "application/json" },
+      ...opts,
+    });
+  }
+
+  async function apiJson(path: string, opts?: RequestInit) {
+    const resp = await api(path, opts);
+    return resp.json() as Promise<any>;
+  }
+
+  it("POST /init creates a repo", async () => {
+    const data = await apiJson("/init", { method: "POST", body: JSON.stringify({}) });
+    expect(data.ok).toBe(true);
+  });
+
+  it("POST /commits creates a commit with files", async () => {
+    await api("/init", { method: "POST", body: JSON.stringify({}) });
+    const data = await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "main",
+        message: "initial commit",
+        author: "Test",
+        email: "test@test.com",
+        files: [
+          { path: "README.md", content: "# Hello" },
+          { path: "src/index.ts", content: "console.log('hi')" },
+        ],
+      }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("GET /files lists files at root", async () => {
+    const data = await apiJson("/files?ref=main");
+    expect(data.files.length).toBeGreaterThan(0);
+    const names = data.files.map((f: any) => f.path);
+    expect(names).toContain("README.md");
+    expect(names).toContain("src");
+  });
+
+  it("GET /files?path= reads a file by path", async () => {
+    const data = await apiJson("/files?ref=main&path=README.md");
+    expect(data.content).toBe("# Hello");
+  });
+
+  it("GET /files?path= reads nested file", async () => {
+    const data = await apiJson("/files?ref=main&path=src/index.ts");
+    expect(data.content).toBe("console.log('hi')");
+  });
+
+  it("GET /files/all lists all files recursively", async () => {
+    const data = await apiJson("/files/all?ref=main");
+    const paths = data.files.map((f: any) => f.path);
+    expect(paths).toContain("README.md");
+    expect(paths).toContain("src/index.ts");
+  });
+
+  it("GET /log returns commit history", async () => {
+    const data = await apiJson("/log?ref=main");
+    expect(data.commits.length).toBe(1);
+    expect(data.commits[0].message).toContain("initial commit");
+    expect(data.commits[0].author).toBe("Test");
+  });
+
+  it("POST /branches creates a branch", async () => {
+    const data = await apiJson("/branches", {
+      method: "POST",
+      body: JSON.stringify({ name: "feature" }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("GET /branches lists branches", async () => {
+    const data = await apiJson("/branches");
+    const names = data.branches.map((b: any) => b.name);
+    expect(names).toContain("main");
+    expect(names).toContain("feature");
+  });
+
+  it("POST /commits on branch creates a new commit", async () => {
+    const data = await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "feature",
+        message: "feature work",
+        author: "Dev",
+        email: "dev@test.com",
+        files: [{ path: "feature.txt", content: "new feature" }],
+      }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("POST /checkout switches HEAD", async () => {
+    const data = await apiJson("/checkout", {
+      method: "POST",
+      body: JSON.stringify({ branch: "feature" }),
+    });
+    expect(data.ok).toBe(true);
+  });
+
+  it("GET /diff shows changes between commits", async () => {
+    const log = await apiJson("/log?ref=feature&max=2");
+    const data = await apiJson(`/diff?a=${log.commits[0].sha}`);
+    expect(data.entries.length).toBeGreaterThan(0);
+    expect(data.entries[0].path).toBe("feature.txt");
+    expect(data.entries[0].status).toBe("added");
+  });
+
+  it("POST /merge fast-forwards target to source", async () => {
+    const data = await apiJson("/merge", {
+      method: "POST",
+      body: JSON.stringify({
+        target: "main",
+        source: "feature",
+        author: "Dev",
+        email: "dev@test.com",
+      }),
+    });
+    expect(data.strategy).toBe("fast-forward");
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("POST /tags creates a lightweight tag", async () => {
+    const data = await apiJson("/tags", {
+      method: "POST",
+      body: JSON.stringify({ name: "v1.0" }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("POST /tags with message creates an annotated tag", async () => {
+    const data = await apiJson("/tags", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "v2.0",
+        tagger: "Dev",
+        email: "dev@test.com",
+        message: "Release v2.0",
+      }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("GET /tags lists tags", async () => {
+    const data = await apiJson("/tags");
+    const names = data.tags.map((t: any) => t.name);
+    expect(names).toContain("v1.0");
+    expect(names).toContain("v2.0");
+    const v2 = data.tags.find((t: any) => t.name === "v2.0");
+    expect(v2.type).toBe("annotated");
+  });
+
+  it("DELETE /tags/:name deletes a tag", async () => {
+    const data = await apiJson("/tags/v1.0", { method: "DELETE" });
+    expect(data.ok).toBe(true);
+    const tags = await apiJson("/tags");
+    const names = tags.tags.map((t: any) => t.name);
+    expect(names).not.toContain("v1.0");
+  });
+
+  it("PATCH /branches/:name renames a branch", async () => {
+    const data = await apiJson("/branches/feature", {
+      method: "PATCH",
+      body: JSON.stringify({ newName: "feat-renamed" }),
+    });
+    expect(data.ok).toBe(true);
+    const branches = await apiJson("/branches");
+    const names = branches.branches.map((b: any) => b.name);
+    expect(names).toContain("feat-renamed");
+    expect(names).not.toContain("feature");
+  });
+
+  it("DELETE /branches/:name deletes a branch", async () => {
+    // Must checkout a different branch first since feat-renamed may be HEAD
+    await api("/checkout", { method: "POST", body: JSON.stringify({ branch: "main" }) });
+    const data = await apiJson("/branches/feat-renamed", { method: "DELETE" });
+    expect(data.ok).toBe(true);
+    const branches = await apiJson("/branches");
+    const names = branches.branches.map((b: any) => b.name);
+    expect(names).not.toContain("feat-renamed");
+  });
+
+  it("GET /rev-parse resolves refs", async () => {
+    const data = await apiJson("/rev-parse?ref=main");
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("GET /rev-parse resolves HEAD", async () => {
+    // Switch back to main first
+    await api("/checkout", { method: "POST", body: JSON.stringify({ branch: "main" }) });
+    const data = await apiJson("/rev-parse?ref=HEAD");
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("GET /show reads a raw object", async () => {
+    const revParse = await apiJson("/rev-parse?ref=main");
+    const data = await apiJson(`/show?sha=${revParse.sha}`);
+    expect(data.type).toBe("commit");
+    expect(data.size).toBeGreaterThan(0);
+  });
+
+  it("POST /cherry-pick applies a commit onto another branch", async () => {
+    // Create a branch, add a commit, cherry-pick it onto main
+    await apiJson("/branches", { method: "POST", body: JSON.stringify({ name: "cp-source" }) });
+    const commit = await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "cp-source",
+        message: "cherry pick me",
+        author: "Dev",
+        email: "dev@test.com",
+        files: [{ path: "cherry.txt", content: "cherry" }],
+      }),
+    });
+    const data = await apiJson("/cherry-pick", {
+      method: "POST",
+      body: JSON.stringify({
+        commit: commit.sha,
+        target: "main",
+        author: "Dev",
+        email: "dev@test.com",
+      }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+    // Verify file exists on main now
+    const files = await apiJson("/files/all?ref=main");
+    const paths = files.files.map((f: any) => f.path);
+    expect(paths).toContain("cherry.txt");
+  });
+
+  it("POST /revert undoes a commit", async () => {
+    // Add a unique file, then revert that specific commit
+    const addCommit = await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "main",
+        message: "add revert-target.txt",
+        author: "Dev",
+        email: "dev@test.com",
+        files: [{ path: "revert-target.txt", content: "will be reverted" }],
+      }),
+    });
+    // Verify file exists
+    let files = await apiJson("/files/all?ref=main");
+    let paths = files.files.map((f: any) => f.path);
+    expect(paths).toContain("revert-target.txt");
+
+    const data = await apiJson("/revert", {
+      method: "POST",
+      body: JSON.stringify({
+        commit: addCommit.sha,
+        target: "main",
+        author: "Dev",
+        email: "dev@test.com",
+      }),
+    });
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+    // revert-target.txt should be gone after revert
+    files = await apiJson("/files/all?ref=main");
+    paths = files.files.map((f: any) => f.path);
+    expect(paths).not.toContain("revert-target.txt");
+  });
+
+  it("POST /reset moves a branch ref", async () => {
+    const log = await apiJson("/log?ref=main&max=5");
+    const targetSha = log.commits[1].sha; // one commit back
+    const data = await apiJson("/reset", {
+      method: "POST",
+      body: JSON.stringify({ ref: "main", target: targetSha }),
+    });
+    expect(data.ok).toBe(true);
+    const revParse = await apiJson("/rev-parse?ref=main");
+    expect(revParse.sha).toBe(targetSha);
+  });
+
+  it("POST /merge creates a three-way merge commit", async () => {
+    // Create two diverging branches from a common base
+    await apiJson("/branches", { method: "POST", body: JSON.stringify({ name: "merge-a" }) });
+    await apiJson("/branches", { method: "POST", body: JSON.stringify({ name: "merge-b" }) });
+
+    await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "merge-a",
+        message: "change on A",
+        author: "Dev",
+        email: "dev@test.com",
+        files: [{ path: "a.txt", content: "from A" }],
+      }),
+    });
+    await apiJson("/commits", {
+      method: "POST",
+      body: JSON.stringify({
+        ref: "merge-b",
+        message: "change on B",
+        author: "Dev",
+        email: "dev@test.com",
+        files: [{ path: "b.txt", content: "from B" }],
+      }),
+    });
+
+    const data = await apiJson("/merge", {
+      method: "POST",
+      body: JSON.stringify({
+        target: "merge-a",
+        source: "merge-b",
+        author: "Dev",
+        email: "dev@test.com",
+        message: "Merge merge-b into merge-a",
+      }),
+    });
+    expect(data.strategy).toBe("merge");
+    expect(data.sha).toMatch(/^[0-9a-f]{40}$/);
+
+    // Both files should exist after merge
+    const files = await apiJson("/files/all?ref=merge-a");
+    const paths = files.files.map((f: any) => f.path);
+    expect(paths).toContain("a.txt");
+    expect(paths).toContain("b.txt");
+  });
+
+  it("returns 404 for unknown API routes", async () => {
+    const resp = await api("/nonexistent");
+    expect(resp.status).toBe(404);
+  });
+
+  it("returns 400 for errors (e.g. deleting checked-out branch)", async () => {
+    await api("/checkout", { method: "POST", body: JSON.stringify({ branch: "main" }) });
+    const resp = await api("/branches/main", { method: "DELETE" });
+    expect(resp.status).toBe(400);
+    const data = await resp.json() as any;
+    expect(data.error).toContain("Cannot delete");
+  });
+});
+
+// ============================================================
 // Helpers
 // ============================================================
 

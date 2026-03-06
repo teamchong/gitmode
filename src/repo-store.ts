@@ -13,6 +13,7 @@ import { GitEngine } from "./git-engine";
 import { handleUploadPack } from "./upload-pack";
 import { handleReceivePack } from "./receive-pack";
 import { handleInfoRefs } from "./info-refs";
+import { GitPorcelain } from "./git-porcelain";
 
 export class RepoStore extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -150,8 +151,228 @@ export class RepoStore extends DurableObject<Env> {
         });
       }
 
+      // === Porcelain API ===
+
+      case "api": {
+        const porcelain = new GitPorcelain(engine);
+        const url = new URL(request.url);
+        const apiAction = request.headers.get("x-api-action") ?? "";
+        try {
+          return await handleApiAction(porcelain, engine, apiAction, request, url);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
       default:
         return new Response("Unknown action\n", { status: 400 });
     }
+  }
+}
+
+async function handleApiAction(
+  porcelain: GitPorcelain,
+  engine: GitEngine,
+  action: string,
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  switch (action) {
+    // --- init ---
+    case "init": {
+      const body = await request.json() as { defaultBranch?: string };
+      porcelain.init(body.defaultBranch);
+      return Response.json({ ok: true });
+    }
+
+    // --- files ---
+    case "read-file": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const path = url.searchParams.get("path") ?? "";
+      const content = await porcelain.catFile(ref, path);
+      if (!content) return Response.json({ error: "not found" }, { status: 404 });
+      // Return as base64 for binary safety
+      const text = new TextDecoder().decode(content);
+      return Response.json({ content: text, size: content.length });
+    }
+
+    case "list-files": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const path = url.searchParams.get("path") ?? "";
+      const files = await porcelain.listFiles(ref, path);
+      return Response.json({ files });
+    }
+
+    case "list-all-files": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const files = await porcelain.listAllFiles(ref);
+      return Response.json({ files });
+    }
+
+    // --- commit ---
+    case "commit": {
+      const body = await request.json() as {
+        ref: string;
+        message: string;
+        author: string;
+        email: string;
+        files: Array<{ path: string; content: string | null }>;
+        timestamp?: number;
+      };
+      const sha = await porcelain.commit({
+        ref: body.ref,
+        message: body.message,
+        author: body.author,
+        email: body.email,
+        files: body.files,
+        timestamp: body.timestamp,
+      });
+      return Response.json({ sha });
+    }
+
+    // --- branches ---
+    case "list-branches": {
+      const branches = porcelain.listBranches();
+      return Response.json({ branches });
+    }
+
+    case "create-branch": {
+      const body = await request.json() as { name: string; startPoint?: string };
+      const sha = await porcelain.createBranch(body.name, body.startPoint);
+      return Response.json({ sha });
+    }
+
+    case "delete-branch": {
+      const body = await request.json() as { name: string };
+      porcelain.deleteBranch(body.name);
+      return Response.json({ ok: true });
+    }
+
+    case "rename-branch": {
+      const body = await request.json() as { oldName: string; newName: string };
+      await porcelain.renameBranch(body.oldName, body.newName);
+      return Response.json({ ok: true });
+    }
+
+    // --- checkout ---
+    case "checkout": {
+      const body = await request.json() as { branch: string };
+      porcelain.checkout(body.branch);
+      return Response.json({ ok: true });
+    }
+
+    case "detach-head": {
+      const body = await request.json() as { sha: string };
+      porcelain.detachHead(body.sha);
+      return Response.json({ ok: true });
+    }
+
+    // --- tags ---
+    case "list-tags": {
+      const tags = await porcelain.listTags();
+      return Response.json({ tags });
+    }
+
+    case "create-tag": {
+      const body = await request.json() as { name: string; target?: string };
+      const sha = await porcelain.createTag(body.name, body.target);
+      return Response.json({ sha });
+    }
+
+    case "create-annotated-tag": {
+      const body = await request.json() as {
+        name: string; target?: string;
+        tagger: string; email: string; message: string;
+        timestamp?: number;
+      };
+      const sha = await porcelain.createAnnotatedTag(body);
+      return Response.json({ sha });
+    }
+
+    case "delete-tag": {
+      const body = await request.json() as { name: string };
+      porcelain.deleteTag(body.name);
+      return Response.json({ ok: true });
+    }
+
+    // --- log ---
+    case "log": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const maxCount = parseInt(url.searchParams.get("max") ?? "50", 10);
+      const commits = await porcelain.log(ref, maxCount);
+      return Response.json({ commits });
+    }
+
+    // --- diff ---
+    case "diff": {
+      const refA = url.searchParams.get("a") ?? "";
+      const refB = url.searchParams.get("b") ?? undefined;
+      const entries = await porcelain.diff(refA, refB);
+      return Response.json({ entries });
+    }
+
+    // --- merge ---
+    case "merge": {
+      const body = await request.json() as {
+        target: string; source: string;
+        author: string; email: string;
+        message?: string; timestamp?: number;
+      };
+      const result = await porcelain.merge(body);
+      return Response.json(result);
+    }
+
+    // --- cherry-pick ---
+    case "cherry-pick": {
+      const body = await request.json() as {
+        commit: string; target: string;
+        author: string; email: string;
+        timestamp?: number;
+      };
+      const sha = await porcelain.cherryPick(body);
+      return Response.json({ sha });
+    }
+
+    // --- revert ---
+    case "revert": {
+      const body = await request.json() as {
+        commit: string; target: string;
+        author: string; email: string;
+        timestamp?: number;
+      };
+      const sha = await porcelain.revert(body);
+      return Response.json({ sha });
+    }
+
+    // --- reset ---
+    case "reset": {
+      const body = await request.json() as { ref: string; target: string };
+      await porcelain.reset(body.ref, body.target);
+      return Response.json({ ok: true });
+    }
+
+    // --- rev-parse ---
+    case "rev-parse": {
+      const ref = url.searchParams.get("ref") ?? "";
+      const sha = await porcelain.resolveRef(ref);
+      return Response.json({ sha });
+    }
+
+    // --- show object ---
+    case "show": {
+      const sha = url.searchParams.get("sha") ?? "";
+      const obj = await engine.readObject(sha);
+      if (!obj) return Response.json({ error: "not found" }, { status: 404 });
+      const typeNames = ["", "blob", "tree", "commit", "tag"];
+      return Response.json({
+        type: typeNames[obj.type] ?? "unknown",
+        size: obj.content.length,
+        content: new TextDecoder().decode(obj.content),
+      });
+    }
+
+    default:
+      return Response.json({ error: `Unknown API action: ${action}` }, { status: 400 });
   }
 }
