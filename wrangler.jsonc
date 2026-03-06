@@ -1,0 +1,60 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitmode",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // R2: git object storage + materialized worktrees
+  "r2_buckets": [
+    {
+      "binding": "OBJECTS",
+      "bucket_name": "gitmode-objects"
+    }
+  ],
+
+  // KV: refs (branches, tags, HEAD) — globally replicated fast reads
+  "kv_namespaces": [
+    {
+      "binding": "REFS",
+      "id": "gitmode-refs"
+    }
+  ],
+
+  // D1: metadata (repo list, commit index, permissions)
+  "d1_databases": [
+    {
+      "binding": "META",
+      "database_name": "gitmode-meta",
+      "database_id": "gitmode-meta"
+    }
+  ],
+
+  // Durable Objects: per-repo lock for atomic ref updates during push
+  "durable_objects": {
+    "bindings": [
+      { "name": "REPO_LOCK", "class_name": "RepoLock" }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["RepoLock"]
+    }
+  ],
+
+  // WASM module
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": false
+    }
+  ],
+
+  "assets": {
+    "directory": "./dist/client",
+    "not_found_handling": "none"
+  }
+}

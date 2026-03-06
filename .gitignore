@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.wrangler/
+.zig-cache/
+zig-cache/
+zig-out/
+wasm/zig-out/
+wasm/.zig-cache/
+wasm/libgit2-wasm/out/
+*.wasm
+!src/wasm/*.wasm
+wrangler.toml.bak
+.claude/
