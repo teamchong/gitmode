@@ -13,13 +13,17 @@
     "test:zig": "cd wasm && zig build test",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:conformance": "bash test/conformance.sh"
+    "test:conformance": "bash test/conformance.sh",
+    "test:ssh": "bash test/ssh-conformance.sh",
+    "ssh:proxy": "npx tsx ssh/proxy.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.20",
     "@cloudflare/workers-types": "^4.20250301.0",
+    "@types/ssh2": "^1.15.5",
     "@vitest/runner": "~3.2.4",
     "@vitest/snapshot": "~3.2.4",
+    "ssh2": "^1.17.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4",
     "wrangler": "^4.71.0"
