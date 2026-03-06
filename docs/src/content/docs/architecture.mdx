@@ -7,17 +7,18 @@ description: How gitmode works under the hood.
 
 ![Architecture](/gitmode/architecture.svg)
 
-gitmode runs entirely on Cloudflare's edge infrastructure with three components:
+gitmode runs entirely on Cloudflare's edge infrastructure with four components:
 
 | Component | Role |
 |-----------|------|
 | **Worker** | HTTP router — matches git protocol and REST API routes, forwards to Durable Object |
 | **RepoStore DO** | Per-repo Durable Object with embedded SQLite for refs, HEAD, metadata, commit index |
 | **R2** | Object storage for git objects (blobs, trees, commits, tags) as zlib-compressed loose objects |
+| **SSH Proxy** | Node.js SSH-to-HTTP proxy for `git clone ssh://...` support (development only) |
 
 ## Request Flow
 
-1. **Git client** sends HTTP request (e.g., `git push`)
+1. **Git client** sends HTTP request (e.g., `git push`) or SSH request via the [SSH proxy](/gitmode/ssh-transport/)
 2. **Worker** matches the URL pattern, extracts owner/repo, gets the RepoStore DO handle
 3. **Worker** forwards the request to the DO with action headers (`x-action`, `x-repo-path`)
 4. **RepoStore DO** handles the action:
@@ -66,7 +67,7 @@ CREATE TABLE commits (
 
 ### R2 Object Layout
 
-Git objects are stored at `{owner}/{repo}/{sha}` as zlib-compressed data with a type prefix byte:
+Git objects are stored at `{owner}/{repo}/objects/{sha[0:2]}/{sha[2:]}` (matching git's loose object layout) as zlib-compressed data with a type prefix byte:
 
 | Type | Value | Description |
 |------|-------|-------------|

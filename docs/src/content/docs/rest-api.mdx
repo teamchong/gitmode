@@ -5,6 +5,26 @@ description: Programmatic API for all git operations.
 
 All REST API endpoints use the base path `/api/repos/:owner/:repo`. Request and response bodies are JSON.
 
+## List Repositories
+
+```http
+GET /api/repos
+GET /api/repos/:owner
+```
+
+Returns all known repositories, optionally filtered by owner:
+
+```json
+{
+  "repos": [
+    { "owner": "alice", "name": "project-a" },
+    { "owner": "alice", "name": "project-b" }
+  ]
+}
+```
+
+Repos are discovered from R2 object prefixes, so only repos with at least one commit appear.
+
 ## Repository
 
 ### Initialize
@@ -237,9 +257,10 @@ DELETE /api/repos/:owner/:repo/tags/:name
 
 ```http
 GET /api/repos/:owner/:repo/diff?a=<ref>&b=<ref>
+GET /api/repos/:owner/:repo/diff?from=<ref>&to=<ref>
 ```
 
-Compares two refs. If `b` is omitted, diffs `a` against its parent commit.
+Compares two refs. Both `a`/`b` and `from`/`to` parameter names are accepted. If `b`/`to` is omitted, diffs against the parent commit.
 
 ```json
 {

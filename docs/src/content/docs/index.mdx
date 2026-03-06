@@ -37,8 +37,8 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
 
 ```
 Git Client  ──HTTP──▶  Cloudflare Worker  ──▶  RepoStore DO (SQLite)
-                                           ──▶  R2 (git objects)
-                                           ──▶  Zig WASM (SHA-1, zlib, packfiles)
+            ──SSH───▶  SSH Proxy ──HTTP──▶     ──▶  R2 (git objects)
+                                               ──▶  Zig WASM (SHA-1, zlib, packfiles)
 ```
 
 Every repository maps to a single Durable Object instance. The DO's embedded SQLite stores refs (branches, tags, HEAD) and metadata. Git objects (blobs, trees, commits, tags) live in R2 as zlib-compressed loose objects. The Zig WASM module handles all binary operations: SHA-1 hashing, zlib inflate/deflate, packfile parsing, and delta encoding.

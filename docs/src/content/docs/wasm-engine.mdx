@@ -22,7 +22,7 @@ pnpm run build:wasm
 
 ## Exports
 
-The WASM module exports 27 functions organized by category:
+The WASM module exports 28 functions organized by category:
 
 ### Memory Management
 
@@ -85,6 +85,12 @@ The WASM module exports 27 functions organized by category:
 | `simd_memeql` | SIMD-accelerated memory comparison |
 | `simd_memchr` | SIMD-accelerated byte search |
 
+### Checkout
+
+| Export | Description |
+|--------|-------------|
+| `checkout_commit` | Materialize a commit's tree into R2 worktree for browseable file access |
+
 ### libgit2 Integration
 
 | Export | Description |
@@ -99,7 +105,7 @@ The WASM module exports 27 functions organized by category:
 
 The WASM binary was reduced from 1.2MB to 791KB (34% reduction) using:
 
-1. **wasm-metadce** — Dead code elimination based on an export graph. Only 27 exports are kept; all unreachable functions are removed. This reduced function count from ~3000+ to 1272.
+1. **wasm-metadce** — Dead code elimination based on an export graph. Only 28 exports are kept; all unreachable functions are removed. This reduced function count from ~3000+ to 1272.
 
 2. **wasm-opt -Oz** — Binaryen's aggressive size optimizer. Applies code folding, constant propagation, dead argument elimination, and instruction combining.
 
