@@ -64,23 +64,43 @@ export class GitEngine {
     content: Uint8Array
   ): Promise<string> {
     const wasm = await this.getWasm();
+    const { sha1Hex, compressed } = this.prepareObject(wasm, type, content);
+    await this.putObject(sha1Hex, compressed);
+    return sha1Hex;
+  }
+
+  /** Prepare an object for storage (hash + compress) without writing to R2. */
+  prepareObject(
+    wasm: WasmEngine,
+    type: number,
+    content: Uint8Array,
+  ): { sha1Hex: string; compressed: Uint8Array } {
     const digest = wasm.hashObject(type, content);
     const sha1Hex = Array.from(digest)
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-
-    // Compress and store
     const header = new TextEncoder().encode(
       `${typeToName(type)} ${content.length}\0`
     );
     const full = new Uint8Array(header.length + content.length);
     full.set(header);
     full.set(content, header.length);
-
     const compressed = wasm.zlibDeflate(full);
-    await this.putObject(sha1Hex, compressed);
+    return { sha1Hex, compressed };
+  }
 
-    return sha1Hex;
+  /** Batch write multiple objects to R2 in parallel. */
+  async putObjects(entries: Array<{ sha1Hex: string; compressed: Uint8Array }>): Promise<void> {
+    // Run up to 50 concurrent R2 PUTs
+    const CONCURRENCY = 50;
+    for (let i = 0; i < entries.length; i += CONCURRENCY) {
+      const batch = entries.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(e => this.putObject(e.sha1Hex, e.compressed)));
+    }
+  }
+
+  getWasmPublic(): Promise<WasmEngine> {
+    return this.getWasm();
   }
 
   /** Read and decompress a git object. Returns { type, content }. */
@@ -181,6 +201,26 @@ export class GitEngine {
     sets.push("updated_at = ?");
     values.push(new Date().toISOString());
     sql.exec(`UPDATE repo_meta SET ${sets.join(", ")} WHERE id = 1`, ...values);
+  }
+
+  indexFileSize(sha: string, size: number): void {
+    const sql = this.requireSql();
+    sql.exec("INSERT OR IGNORE INTO file_sizes (sha, size) VALUES (?, ?)", sha, size);
+  }
+
+  getFileSizes(shas: string[]): Map<string, number> {
+    if (shas.length === 0) return new Map();
+    const sql = this.requireSql();
+    const result = new Map<string, number>();
+    // SQLite handles IN clauses efficiently — batch in groups of 500
+    for (let i = 0; i < shas.length; i += 500) {
+      const batch = shas.slice(i, i + 500);
+      const params = batch.map(() => "?").join(",");
+      for (const row of sql.exec(`SELECT sha, size FROM file_sizes WHERE sha IN (${params})`, ...batch)) {
+        result.set(row.sha as string, row.size as number);
+      }
+    }
+    return result;
   }
 
   indexCommit(

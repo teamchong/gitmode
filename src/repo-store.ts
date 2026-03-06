@@ -63,6 +63,12 @@ export class RepoStore extends DurableObject<Env> {
         role TEXT NOT NULL
       )
     `);
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS file_sizes (
+        sha TEXT PRIMARY KEY,
+        size INTEGER NOT NULL
+      )
+    `);
   }
 
   async fetch(request: Request): Promise<Response> {

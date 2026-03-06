@@ -735,17 +735,37 @@ export class GitPorcelain {
     files: number;
     size: number;
   }> {
-    // Walk the commit graph to get accurate count (SQLite index may be incomplete)
+    // Walk the commit graph to get accurate count
     const allCommits = await this.log(ref, 10000);
     const branches = this.listBranches().length;
     const tags = (await this.listTags()).length;
 
-    // Count files and total size
+    // Count files and total size — use SQLite cache, only hit R2 for misses
     const allFiles = await this.listAllFiles(ref);
+    const allShas = allFiles.map(f => f.sha);
+    const cached = this.engine.getFileSizes(allShas);
+
     let totalSize = 0;
+    const uncached: Array<{ sha: string }> = [];
+
     for (const f of allFiles) {
-      const obj = await this.engine.readObject(f.sha);
-      if (obj) totalSize += obj.content.length;
+      const size = cached.get(f.sha);
+      if (size !== undefined) {
+        totalSize += size;
+      } else {
+        uncached.push(f);
+      }
+    }
+
+    // Fetch uncached sizes from R2 in parallel and cache them
+    if (uncached.length > 0) {
+      const reads = await Promise.all(
+        uncached.map(f => this.engine.readObject(f.sha).then(obj => ({ sha: f.sha, size: obj?.content.length ?? 0 })))
+      );
+      for (const { sha, size } of reads) {
+        totalSize += size;
+        this.engine.indexFileSize(sha, size);
+      }
     }
 
     return {

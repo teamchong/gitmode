@@ -2,6 +2,9 @@
 //
 // Reads packfile v2 format, decompresses each object with Zig WASM,
 // resolves deltas, and stores loose objects.
+//
+// Optimization: prepares all objects (hash + compress) first, then
+// flushes to R2 in batched parallel writes instead of one-at-a-time.
 
 import type { GitEngine } from "./git-engine";
 import { WasmEngine } from "./wasm-engine";
@@ -14,10 +17,9 @@ const PACK_OBJ_TAG = 4;
 const PACK_OBJ_OFS_DELTA = 6;
 const PACK_OBJ_REF_DELTA = 7;
 
-// Internal object types (matching Zig object.zig enum: blob=1, tree=2, commit=3, tag=4)
+// Internal object types (matching Zig enum: blob=1, tree=2, commit=3, tag=4)
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 
-/** Convert packfile type number to internal object type number. */
 function packTypeToObjectType(packType: number): number {
   switch (packType) {
     case PACK_OBJ_COMMIT: return OBJ_COMMIT;
@@ -28,14 +30,11 @@ function packTypeToObjectType(packType: number): number {
   }
 }
 
-/** Parse the target size from a git delta header.
- * Delta format starts with two varints: source_size, target_size.
- */
 function parseDeltaTargetSize(delta: Uint8Array): number {
   let pos = 0;
   // Skip source size varint
   while (pos < delta.length && delta[pos] & 0x80) pos++;
-  pos++; // skip last byte of source size
+  pos++;
   // Read target size varint
   let targetSize = 0;
   let shift = 0;
@@ -59,7 +58,7 @@ export async function unpackPackfile(
   engine: GitEngine,
   packData: Uint8Array
 ): Promise<void> {
-  const wasm = await WasmEngine.create();
+  const wasm = await engine.getWasmPublic();
 
   // Verify header
   if (packData.length < 12) throw new Error("Packfile too short");
@@ -71,8 +70,9 @@ export async function unpackPackfile(
 
   const numObjects = readUint32BE(packData, 8);
 
-  // Parse and store all objects
+  // Phase 1: Parse all objects (CPU-only, no R2)
   const objects: PackObject[] = [];
+  const pendingWrites: Array<{ sha1Hex: string; compressed: Uint8Array }> = [];
   let offset = 12;
 
   for (let i = 0; i < numObjects; i++) {
@@ -92,14 +92,13 @@ export async function unpackPackfile(
       offset += bytesRead;
     }
 
-    // Decompress zlib data and track how many compressed bytes were consumed
+    // Decompress zlib data
     const maxDecompressed = Math.max(size * 2, 65536);
     const remaining = packData.slice(offset);
     const { data: decompressed, consumed } = wasm.zlibInflateTracked(remaining, maxDecompressed);
     offset += consumed;
 
     if (type === PACK_OBJ_REF_DELTA && baseRef) {
-      // Resolve ref delta
       const targetSize = parseDeltaTargetSize(decompressed);
       const maxOutput = Math.max(targetSize + 64, 65536);
       const baseHex = Array.from(baseRef)
@@ -107,33 +106,38 @@ export async function unpackPackfile(
         .join("");
       const baseObj = objects.find((o) => o.sha1Hex === baseHex);
       if (!baseObj) {
-        // Base might already be in storage
+        // Base might already be in storage — need R2 read for this one
         const stored = await engine.readObject(baseHex);
         if (!stored) throw new Error(`Missing delta base: ${baseHex}`);
         const resolved = wasm.deltaApply(stored.content, decompressed, maxOutput);
-        const sha1Hex = await engine.storeObject(stored.type, resolved);
-        objects.push({ type: stored.type, data: resolved, sha1Hex, offset: entryOffset });
+        const prepared = engine.prepareObject(wasm, stored.type, resolved);
+        pendingWrites.push(prepared);
+        objects.push({ type: stored.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
       } else {
         const resolved = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
-        const sha1Hex = await engine.storeObject(baseObj.type, resolved);
-        objects.push({ type: baseObj.type, data: resolved, sha1Hex, offset: entryOffset });
+        const prepared = engine.prepareObject(wasm, baseObj.type, resolved);
+        pendingWrites.push(prepared);
+        objects.push({ type: baseObj.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
       }
     } else if (type === PACK_OBJ_OFS_DELTA && baseDeltaOffset !== undefined) {
-      // Resolve offset delta
       const targetSize = parseDeltaTargetSize(decompressed);
       const maxOutput = Math.max(targetSize + 64, 65536);
       const baseObj = objects.find((o) => o.offset === baseDeltaOffset);
       if (!baseObj) throw new Error(`Missing ofs-delta base at offset ${baseDeltaOffset}`);
       const resolved = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
-      const sha1Hex = await engine.storeObject(baseObj.type, resolved);
-      objects.push({ type: baseObj.type, data: resolved, sha1Hex, offset: entryOffset });
+      const prepared = engine.prepareObject(wasm, baseObj.type, resolved);
+      pendingWrites.push(prepared);
+      objects.push({ type: baseObj.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
     } else {
-      // Regular object — convert pack type to internal object type
       const objType = packTypeToObjectType(type);
-      const sha1Hex = await engine.storeObject(objType, decompressed);
-      objects.push({ type: objType, data: decompressed, sha1Hex, offset: entryOffset });
+      const prepared = engine.prepareObject(wasm, objType, decompressed);
+      pendingWrites.push(prepared);
+      objects.push({ type: objType, data: decompressed, sha1Hex: prepared.sha1Hex, offset: entryOffset });
     }
   }
+
+  // Phase 2: Batch write all objects to R2 in parallel
+  await engine.putObjects(pendingWrites);
 }
 
 function readUint32BE(buf: Uint8Array, offset: number): number {
@@ -177,4 +181,3 @@ function parseOfsOffset(
   pos++;
   return { negOffset: value, bytesRead: pos - offset };
 }
-

@@ -135,7 +135,8 @@ export async function handleReceivePack(
 
       const branch = update.refname.replace(/^refs\/heads\//, "");
       try {
-        await materializeWorktree(engine, env, repoPath, branch, update.newSha);
+        const oldSha = update.oldSha !== ZERO_SHA ? update.oldSha : undefined;
+        await materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha);
       } catch (err) {
         console.error(`checkout failed for ${branch}: ${err}`);
       }
