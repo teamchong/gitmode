@@ -5,7 +5,7 @@ description: How gitmode works under the hood.
 
 ## Overview
 
-![Architecture](/gitmode/architecture.svg)
+![Architecture](/gitmode/img/architecture.svg)
 
 gitmode runs entirely on Cloudflare's edge infrastructure with four components:
 
@@ -85,3 +85,28 @@ Each repository maps to exactly one Durable Object instance. All ref reads and w
 - **Atomic multi-ref updates** — a single push can update multiple refs atomically
 
 R2 objects are immutable (content-addressed by SHA-1), so they don't require coordination.
+
+## Push Flow (Detailed)
+
+1. Client sends ref update commands + packfile
+2. Worker routes to RepoStore DO (one per repo, strongly consistent)
+3. **Packfile unpack — Phase 1 (CPU-only):** Objects prepared in memory (SHA-1 hash + zlib compress)
+4. **Packfile unpack — Phase 2 (I/O):** Batch write to R2 with 50 concurrent PUTs
+5. Refs updated in DO SQLite
+6. Commits indexed in DO SQLite (author, message, timestamp)
+7. **Worktree materialization:**
+   - Uses **optimistic object cache** — in-memory objects from unpack, zero R2 re-reads
+   - **Incremental mode** (default): diffs old tree vs new tree, writes only changed/added files
+   - **Full mode** (first push): writes all files
+8. File sizes cached in DO SQLite for stats endpoint
+9. Report-status returned to client
+
+See [Performance](/gitmode/performance/) for benchmark results and optimization details.
+
+## Worktree
+
+On every push, gitmode materializes the commit tree into R2 as plain files at `{owner}/{repo}/worktrees/{branch}/{filepath}`. This means:
+
+- The **vinext UI** reads files directly from R2 — no git decompression needed
+- Files are **edge-cached** by R2 for fast reads
+- **CI/CD pipelines** can read source files without git operations

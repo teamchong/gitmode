@@ -1,0 +1,101 @@
+---
+title: Performance
+description: Performance optimizations and benchmarks.
+---
+
+## Benchmarks
+
+Measured on localhost dev server (vite dev) with a single Durable Object.
+
+### Git Protocol Operations
+
+| Operation | Small (3 files) | Medium (50 files) | Large (500 files) |
+|---|---|---|---|
+| **Initial push** | 283ms | 183ms | 52ms |
+| **Incremental push** | 85ms | 192ms | 12ms |
+| **Clone** | 95ms | 152ms | 372ms |
+| **Fetch** | 98ms | 153ms | 340ms |
+
+### REST API Response Times
+
+| Endpoint | Latency |
+|---|---|
+| GET /api/repos (list) | 54ms |
+| GET /api/repos/:o/:r (meta) | 44ms |
+| GET /branches | 43ms |
+| GET /log (50 commits) | 61ms |
+| GET /files (root listing) | 42ms |
+| GET /files/all (500 files) | 62ms |
+| GET /stats (500 files) | 68ms |
+| GET /contributors | 42ms |
+
+Run benchmarks yourself:
+
+```bash
+./test/bench.sh
+```
+
+## Push Flow
+
+![Push Flow](/gitmode/img/push-flow.svg)
+
+The push pipeline is optimized into distinct phases to minimize latency.
+
+## Optimizations
+
+### Batch R2 Writes
+
+**Problem:** Each git object was written to R2 individually during packfile unpack — 500 objects = 500 sequential R2 PUTs.
+
+**Solution:** Two-phase approach:
+1. **Phase 1 (CPU-only):** `prepareObject()` hashes and zlib-compresses each object in memory
+2. **Phase 2 (I/O):** `putObjects()` flushes all objects to R2 with 50 concurrent PUTs
+
+**Impact:** Large push 972ms → 52ms (19x faster)
+
+### Incremental Worktree Updates
+
+**Problem:** Every push rewrote all worktree files, even if only one file changed.
+
+**Solution:** `materializeWorktree()` accepts an `oldCommitSha` parameter. When provided:
+1. Walk both old and new commit trees
+2. Diff the file maps (path → blob SHA)
+3. Only write files where the SHA changed
+4. Delete files that were removed
+
+**Impact:** Incremental push 827ms → 12ms (69x faster)
+
+### Optimistic Object Cache
+
+**Problem:** After unpacking a packfile, worktree materialization re-reads the same objects back from R2 — a full round-trip for data already in memory.
+
+**Solution:** `unpackPackfile()` returns an in-memory `ObjectCache` (Map of SHA → `{type, data}`). This cache is passed to `materializeWorktree()`, which checks it before hitting R2.
+
+```
+Before: unpack → write to R2 → walk tree → read from R2 → write worktree
+After:  unpack → write to R2 → walk tree → read from MEMORY → write worktree
+```
+
+**Impact:** Eliminates all R2 GET operations during post-push worktree materialization.
+
+### SQLite File Size Cache
+
+**Problem:** The stats endpoint read every blob from R2 to sum file sizes — one R2 GET per file.
+
+**Solution:** `file_sizes` table in DO SQLite caches blob SHA → size. The stats endpoint reads cached sizes first, only fetching uncached blobs from R2 (and caching them for next time).
+
+**Impact:** Stats 167ms → 68ms (2.5x faster), improves further on repeated calls.
+
+## Cost Analysis
+
+R2 pricing (as of 2026):
+- Class A (PUT/DELETE): $4.50 per million operations
+- Class B (GET/LIST): $0.36 per million operations
+- Storage: $0.015 per GB/month
+
+Per-push costs for a 500-file repo:
+- **Object writes:** ~500 PUTs = $0.00225
+- **Worktree writes:** ~5 PUTs (incremental) = $0.0000225
+- **Object reads:** 0 (optimistic cache) = $0
+
+For 1,000 pushes/month to a 500-file repo: ~$2.25 total R2 costs.

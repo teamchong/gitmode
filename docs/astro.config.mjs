@@ -22,6 +22,7 @@ export default defineConfig({
         { label: "Git Protocol", slug: "git-protocol" },
         { label: "SSH Transport", slug: "ssh-transport" },
         { label: "WASM Engine", slug: "wasm-engine" },
+        { label: "Performance", slug: "performance" },
         { label: "Deployment", slug: "deployment" },
       ],
     }),

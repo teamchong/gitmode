@@ -45,46 +45,7 @@ git push -u origin main
 
 ## Architecture
 
-```
-git client (standard git CLI)
-       |
-       | HTTPS (git smart HTTP protocol)
-       v
-+----------------------------------------------------------+
-|  Cloudflare Worker (TypeScript)                          |
-|  +-----------+  +-------------+  +------------------+   |
-|  | info-refs |  | upload-pack |  | receive-pack     |   |
-|  | (GET)     |  | (clone/     |  | (push)           |   |
-|  |           |  |  fetch)     |  |  + worktree sync  |   |
-|  +-----------+  +-------------+  +------------------+   |
-|       |              |                   |               |
-|       v              v                   v               |
-|  +------------------------------------------------+     |
-|  |  Zig WASM Engine (791KB, SIMD128)              |     |
-|  |  - SHA-1 hashing        - Delta compression    |     |
-|  |  - Packfile encode/decode  - Zlib inflate       |     |
-|  |  - Object serialization - Tree walking          |     |
-|  +------------------------------------------------+     |
-|       |              |                   |               |
-+----------------------------------------------------------+
-        |                                  |
-   +----+----+                    +--------+--------+
-   |   R2    |                    | Durable Objects  |
-   | objects |                    | (per-repo SQLite)|
-   | + work- |                    | - refs           |
-   |   trees |                    | - commits index  |
-   +---------+                    | - repo metadata  |
-                                  | - file size cache|
-                                  +-----------------+
-
-+----------------------------------------------------------+
-|  vinext UI (React Server Components)                     |
-|  - Reads files directly from R2 worktree (no git ops)    |
-|  - Reads commit log from DO SQLite                       |
-|  - Reads refs from DO SQLite                             |
-|  - Same Worker, same bindings, zero API hops             |
-+----------------------------------------------------------+
-```
+![Architecture](docs/public/img/architecture.svg)
 
 ### Storage
 
