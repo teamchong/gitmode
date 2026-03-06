@@ -95,13 +95,14 @@ Tested all 8 vinext RSC pages with real repos via browser automation (CDP).
 
 ### Performance Optimization Priorities
 
-| Priority | Optimization | Expected Impact |
-|---|---|---|
-| 1 | **Batch R2 writes** during packfile unpack | Push 2-3x faster for large repos |
-| 2 | **Incremental worktree update** — only write changed files | Incremental push 5-10x faster |
-| 3 | **Cache file size in SQLite** during commit | Stats endpoint instant |
-| 4 | **Pack storage** — store packfiles as-is instead of unpacking to loose | Push much faster, clone uses existing pack |
-| 5 | **SIMD-accelerated delta encoding** for upload-pack | Faster clone/fetch for large repos |
+| Priority | Optimization | Expected Impact | Status |
+|---|---|---|---|
+| 1 | **Batch R2 writes** during packfile unpack | Push 19x faster (972ms -> 52ms) | **DONE** |
+| 2 | **Incremental worktree update** — only write changed files | Incremental push 69x faster (827ms -> 12ms) | **DONE** |
+| 3 | **Cache file size in SQLite** during commit | Stats 2.5x faster (167ms -> 68ms) | **DONE** |
+| 4 | **Optimistic object cache** — use in-memory objects from packfile unpack for worktree writes | Eliminates all R2 re-reads during worktree materialization | **DONE** |
+| 5 | **Pack storage** — store packfiles as-is instead of unpacking to loose | Push much faster, clone uses existing pack | Planned |
+| 6 | **SIMD-accelerated delta encoding** for upload-pack | Faster clone/fetch for large repos | Planned |
 
 ---
 
@@ -183,18 +184,22 @@ Tested all 8 vinext RSC pages with real repos via browser automation (CDP).
 
 ## Part 6: Recommendations
 
-### Now: Performance + Auth (production readiness)
-1. Batch R2 writes during push (biggest perf win)
-2. Add authentication (API key / JWT + permissions table)
-3. Incremental worktree updates (only write changed files)
+### Done: Performance (shipped)
+1. ~~Batch R2 writes during push~~ — **19x faster** (972ms -> 52ms)
+2. ~~Incremental worktree updates (only write changed files)~~ — **69x faster** (827ms -> 12ms)
+3. ~~Cache file sizes in SQLite~~ — **2.5x faster** (167ms -> 68ms)
+4. ~~Optimistic object cache (skip R2 re-reads for worktree)~~ — eliminates all R2 reads post-push
+
+### Now: Auth (production readiness)
+5. Add authentication (API key / JWT + permissions table)
 
 ### Next: Protocol + Integrations
-4. Git protocol v2 support
-5. Webhooks (post-push, post-merge events)
-6. Branch protection rules
+6. Git protocol v2 support
+7. Webhooks (post-push, post-merge events)
+8. Branch protection rules
 
 ### Later: Platform features
-7. Pull request model via API
-8. Wire up libgit2 blame
-9. Code search via DO SQLite or Workers AI
-10. Template repos / server-side fork
+9. Pull request model via API
+10. Wire up libgit2 blame
+11. Code search via DO SQLite or Workers AI
+12. Template repos / server-side fork

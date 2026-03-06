@@ -11,7 +11,7 @@
 import type { GitEngine } from "./git-engine";
 import type { Env } from "./env";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
-import { unpackPackfile } from "./packfile-reader";
+import { unpackPackfile, type ObjectCache } from "./packfile-reader";
 import { materializeWorktree } from "./checkout";
 
 const decoder = new TextDecoder();
@@ -71,9 +71,10 @@ export async function handleReceivePack(
   // Remaining bytes are the packfile
   const packData = body.slice(offset);
 
-  // Unpack objects from packfile into R2
+  // Unpack objects from packfile into R2, keep in-memory cache for worktree
+  let objectCache: ObjectCache | undefined;
   if (packData.length > 0) {
-    await unpackPackfile(engine, packData);
+    objectCache = await unpackPackfile(engine, packData);
   }
 
   // Apply ref updates
@@ -136,7 +137,7 @@ export async function handleReceivePack(
       const branch = update.refname.replace(/^refs\/heads\//, "");
       try {
         const oldSha = update.oldSha !== ZERO_SHA ? update.oldSha : undefined;
-        await materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha);
+        await materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha, objectCache);
       } catch (err) {
         console.error(`checkout failed for ${branch}: ${err}`);
       }

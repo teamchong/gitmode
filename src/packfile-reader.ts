@@ -54,10 +54,13 @@ interface PackObject {
   offset: number;
 }
 
+/** In-memory object cache from unpacking — avoids R2 re-reads for worktree materialization. */
+export type ObjectCache = Map<string, { type: number; data: Uint8Array }>;
+
 export async function unpackPackfile(
   engine: GitEngine,
   packData: Uint8Array
-): Promise<void> {
+): Promise<ObjectCache> {
   const wasm = await engine.getWasmPublic();
 
   // Verify header
@@ -138,6 +141,13 @@ export async function unpackPackfile(
 
   // Phase 2: Batch write all objects to R2 in parallel
   await engine.putObjects(pendingWrites);
+
+  // Return in-memory cache for optimistic worktree writes
+  const cache: ObjectCache = new Map();
+  for (const obj of objects) {
+    cache.set(obj.sha1Hex, { type: obj.type, data: obj.data });
+  }
+  return cache;
 }
 
 function readUint32BE(buf: Uint8Array, offset: number): number {

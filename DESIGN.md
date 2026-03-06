@@ -28,19 +28,18 @@ edge-cached, and accessible to CI/CD pipelines.
 git client (standard git CLI)
        |
        | HTTPS (git smart HTTP protocol)
-       |
        v
 +----------------------------------------------------------+
 |  Cloudflare Worker (TypeScript)                          |
 |  +-----------+  +-------------+  +------------------+   |
 |  | info-refs |  | upload-pack |  | receive-pack     |   |
 |  | (GET)     |  | (clone/     |  | (push)           |   |
-|  |           |  |  fetch)     |  |  + checkout to R2 |   |
+|  |           |  |  fetch)     |  |  + worktree sync  |   |
 |  +-----------+  +-------------+  +------------------+   |
 |       |              |                   |               |
 |       v              v                   v               |
 |  +------------------------------------------------+     |
-|  |  Zig WASM Engine (936K, SIMD128)               |     |
+|  |  Zig WASM Engine (791KB, SIMD128)              |     |
 |  |  - SHA-1 hashing        - Delta compression    |     |
 |  |  - Packfile encode/decode  - Zlib inflate       |     |
 |  |  - Object serialization - Tree walking          |     |
@@ -48,18 +47,21 @@ git client (standard git CLI)
 |  +------------------------------------------------+     |
 |       |              |                   |               |
 +----------------------------------------------------------+
-        |              |                   |
-   +----+----+    +----+----+    +----+----+----+
-   |   KV    |    |   R2    |    |   D1    | DO |
-   |  refs   |    | objects |    | metadata|lock|
-   |         |    | + files |    |         |    |
-   +---------+    +---------+    +---------+----+
+        |                                  |
+   +----+----+                    +--------+--------+
+   |   R2    |                    | Durable Objects  |
+   | objects |                    | (per-repo SQLite)|
+   | + work- |                    | - refs           |
+   |   trees |                    | - commits index  |
+   +---------+                    | - repo metadata  |
+                                  | - file size cache|
+                                  +-----------------+
 
 +----------------------------------------------------------+
 |  vinext UI (React Server Components)                     |
 |  - Reads files directly from R2 worktree (no git ops)    |
-|  - Reads commit log from D1 (SQL)                        |
-|  - Reads refs from KV                                    |
+|  - Reads commit log from DO SQLite                       |
+|  - Reads refs from DO SQLite                             |
 |  - Same Worker, same bindings, zero API hops             |
 +----------------------------------------------------------+
 ```
@@ -78,26 +80,16 @@ git client (standard git CLI)
 Objects are the git database. Worktrees are materialized on push —
 real files that the UI reads directly without decompression.
 
-### KV (Refs)
+### DO SQLite (Refs + Metadata)
 
-```
-{owner}/{repo}/refs/heads/{branch}    -- SHA-1 hex string (40 bytes)
-{owner}/{repo}/refs/tags/{tag}        -- SHA-1 hex string
-{owner}/{repo}/HEAD                   -- "ref: refs/heads/main"
-```
-
-### D1 (Metadata)
+Each repo gets its own Durable Object with an embedded SQLite database.
 
 Tables:
-- `repos` — owner, name, description, visibility, default_branch
-- `commits` — repo, sha1, author, message, timestamp (indexed for search)
-- `ssh_keys` — owner, fingerprint, public_key
-- `permissions` — repo, username, role (read/write/admin)
-
-### Durable Objects (Locks)
-
-One DO per repo. Used only during `git push` to serialize ref updates.
-Holds no persistent state — refs live in KV.
+- `refs` — name, sha (branches, tags, HEAD)
+- `repo_meta` — owner, name, description, visibility, default_branch
+- `commits` — sha, author_name, author_email, message, timestamp (indexed for search)
+- `file_sizes` — sha, size (blob size cache for stats endpoint)
+- `permissions` — username, role (read/write/admin)
 
 ---
 
@@ -116,6 +108,7 @@ Holds no persistent state — refs live in KV.
 | `simd.zig` | memchr, memeql, memcount | Full SIMD128 |
 | `r2_backend.zig` | R2 key formatting for objects + worktrees | - |
 | `checkout.zig` | Tree walk -> materialize files to R2 | - |
+| `libgit2.zig` | libgit2 bindings (diff, blame, revwalk) | - |
 
 ### Host Imports
 
@@ -125,8 +118,6 @@ The WASM module imports these functions from the TypeScript host:
 env.r2_get(key_ptr, key_len, buf_ptr, buf_cap) -> i32  (bytes read or -1)
 env.r2_put(key_ptr, key_len, data_ptr, data_len) -> i32  (0 or -1)
 env.r2_head(key_ptr, key_len) -> i32  (size or -1)
-env.kv_get(key_ptr, key_len, buf_ptr, buf_cap) -> i32
-env.kv_put(key_ptr, key_len, val_ptr, val_len) -> i32
 env.log_msg(ptr, len) -> void
 ```
 
@@ -134,7 +125,7 @@ env.log_msg(ptr, len) -> void
 
 ```
 Target: wasm32-freestanding + SIMD128
-Optimize: ReleaseSmall (936K binary)
+Optimize: ReleaseSmall (791KB binary)
 Build: zig build wasm
 Tests: zig build test (native target)
 ```
@@ -149,22 +140,26 @@ Tests: zig build test (native target)
 GET  /{owner}/{repo}.git/info/refs?service=git-upload-pack    -> info-refs.ts
 GET  /{owner}/{repo}.git/info/refs?service=git-receive-pack   -> info-refs.ts
 POST /{owner}/{repo}.git/git-upload-pack                      -> upload-pack.ts
-POST /{owner}/{repo}.git/git-receive-pack                     -> receive-pack.ts (via DO lock)
-GET  /{owner}/{repo}.git/HEAD                                 -> KV lookup
+POST /{owner}/{repo}.git/git-receive-pack                     -> receive-pack.ts (via DO)
 /*   (everything else)                                        -> vinext UI
 ```
 
 ### Push Flow
 
 1. Client sends ref update commands + packfile
-2. Worker routes to RepoLock DO (atomic per-repo)
+2. Worker routes to RepoStore DO (one per repo, strongly consistent)
 3. DO calls receive-pack handler
 4. Zig WASM parses packfile, extracts objects
-5. Objects stored in R2 (zlib-compressed)
-6. Refs updated in KV
-7. Checkout: Zig WASM walks commit tree, writes files to R2 worktree
-8. Commit indexed in D1
-9. Report-status returned to client
+5. Phase 1: Objects prepared in CPU (hash + zlib compress) — no I/O
+6. Phase 2: Objects batch-written to R2 (50 concurrent PUTs)
+7. Refs updated in DO SQLite
+8. Commits indexed in DO SQLite (author, message, timestamp)
+9. Worktree materialization:
+   - Incremental: diffs old tree vs new tree, writes only changed/added files
+   - Optimistic: uses in-memory objects from packfile unpack (no R2 re-reads)
+   - Full: only on first push or when old commit is unavailable
+10. File sizes cached in DO SQLite for stats endpoint
+11. Report-status returned to client
 
 ### Clone/Fetch Flow
 
@@ -177,28 +172,49 @@ GET  /{owner}/{repo}.git/HEAD                                 -> KV lookup
 
 ---
 
+## Performance Optimizations
+
+### Implemented
+
+| Optimization | Impact | How |
+|---|---|---|
+| **Batch R2 writes** | Push 19x faster (972ms -> 52ms for 500 files) | `prepareObject()` (CPU-only) then `putObjects()` (50 concurrent PUTs) |
+| **Incremental worktree** | Incremental push 69x faster (827ms -> 12ms) | Diff old/new trees, only write changed files |
+| **Optimistic object cache** | Eliminates all R2 reads during worktree materialization | In-memory map from packfile unpack passed to checkout |
+| **SQLite file size cache** | Stats 2.5x faster (167ms -> 68ms) | `file_sizes` table stores blob SHA -> size |
+
+### Future Considerations
+
+| Optimization | Expected Impact |
+|---|---|
+| Pack storage (store packfiles as-is in R2) | Faster push, native clone |
+| SIMD-accelerated delta encoding | Faster clone/fetch for large repos |
+| DO alarm-based debounce | Coalesce rapid pushes into one worktree update |
+
+---
+
 ## vinext UI
 
 ### Technology
 
 - vinext (Vite + React RSC) deployed on the same Cloudflare Worker
-- Server Components read directly from R2/KV/D1 bindings (zero API hops)
-- Client Components for interactive elements (search, code highlighting)
+- Server Components read directly from R2/DO SQLite bindings (zero API hops)
+- Client Components for interactive elements (active tabs, search)
 
 ### Pages
 
 | Route | Description | Data Source |
 |-------|-------------|-------------|
-| `/` | Landing page / repo list | D1: `SELECT * FROM repos` |
-| `/{owner}` | User's repos | D1: `SELECT * FROM repos WHERE owner = ?` |
-| `/{owner}/{repo}` | Repo overview (README + file tree) | R2 worktree + KV refs |
+| `/` | Landing page / repo list | DO SQLite: repos |
+| `/{owner}` | User's repos | DO SQLite: repos filtered by owner |
+| `/{owner}/{repo}` | Repo overview (README + file tree) | R2 worktree + DO SQLite refs |
 | `/{owner}/{repo}/tree/{branch}/[...path]` | File/directory browser | R2 worktree |
 | `/{owner}/{repo}/blob/{branch}/[...path]` | File viewer with syntax highlight | R2 worktree |
-| `/{owner}/{repo}/commits/{branch}` | Commit history | D1: commits table |
-| `/{owner}/{repo}/commit/{sha}` | Single commit diff | R2: objects + Zig diff |
-| `/{owner}/{repo}/branches` | Branch list | KV: list refs/heads/* |
-| `/{owner}/{repo}/tags` | Tag list | KV: list refs/tags/* |
-| `/{owner}/{repo}/settings` | Repo settings | D1: repos + permissions |
+| `/{owner}/{repo}/commits/{branch}` | Commit history | DO SQLite: commits table |
+| `/{owner}/{repo}/commit/{sha}` | Single commit diff + changed files | R2: objects + libgit2 diff |
+| `/{owner}/{repo}/branches` | Branch list | DO SQLite: refs |
+| `/{owner}/{repo}/tags` | Tag list | DO SQLite: refs |
+| `/{owner}/{repo}/settings` | Repo settings | DO SQLite: repo_meta + permissions |
 
 ### Layout Hierarchy
 
@@ -210,6 +226,7 @@ app/
     page.tsx              -- user profile / repo list
     [repo]/
       layout.tsx          -- repo header (name, branches, tabs)
+      tab-link.tsx        -- client component (active tab indicator)
       page.tsx            -- repo overview (README + tree)
       tree/
         [...path]/
@@ -231,58 +248,35 @@ app/
         page.tsx          -- repo config
 ```
 
-### Design Language
-
-- Monospace-first (code hosting)
-- Dark/light mode via CSS custom properties
-- No component library — plain HTML + CSS
-- File icons based on extension
-- Syntax highlighting via a lightweight WASM-based highlighter or server-rendered
-
 ---
 
-## libgit2 Integration (Phase 2)
+## libgit2 Integration
 
 ### Purpose
 
 Server-side git operations that go beyond protocol handling:
-- `git_diff()` — compute diffs for commit view
-- `git_blame()` — blame annotations in file viewer
-- `git_merge()` — merge branches server-side
-- `git_checkout_tree()` — worktree materialization (replace our Zig checkout)
+- `git_diff()` — compute diffs for commit view (working)
+- `git_blame()` — blame annotations in file viewer (ODB callbacks need wiring)
+- `git_merge()` — three-way merge for branches (working)
+- `git_revwalk()` — commit history traversal (working)
 
 ### Approach
 
 1. libgit2 C source (deps/libgit2/) compiled to WASM via `zig cc`
 2. Custom `git_odb_backend` vtable pointing to R2 host imports
-3. Custom `git_refdb_backend` vtable pointing to KV host imports
-4. POSIX shims for filesystem calls (same pattern as pymode/CPython)
+3. Custom `git_refdb_backend` vtable pointing to DO SQLite host imports
+4. POSIX shims for filesystem calls
 5. Ships zlib, pcre, SHA1, xdiff — zero external deps
-
-### Backend Vtable
-
-```c
-struct git_odb_backend {
-    int (*read)(void **data, size_t *len, git_object_t *type, git_odb_backend *, const git_oid *);
-    int (*write)(git_odb_backend *, const git_oid *, const void *, size_t, git_object_t);
-    int (*exists)(git_odb_backend *, const git_oid *);
-    void (*free)(git_odb_backend *);
-    // ... more callbacks
-};
-```
-
-We implement each callback to call R2 via host imports.
 
 ---
 
-## SSH Support (Phase 2)
+## SSH Support
 
-Cloudflare Workers support TCP via the `connect()` API.
-
-Options:
-1. Implement SSH key exchange in Zig WASM (curve25519 + ed25519)
-2. Use Cloudflare Tunnel to bridge SSH -> Worker HTTP
-3. Compile a minimal SSH library (e.g., libssh2) to WASM alongside libgit2
+SSH proxy translates SSH git commands to HTTP protocol:
+- SSH connection received by proxy
+- Git command parsed (git-upload-pack / git-receive-pack)
+- Proxied to Worker HTTP endpoint
+- Sideband passthrough for progress messages
 
 ---
 
@@ -293,10 +287,9 @@ Options:
 Deploy button in README triggers:
 1. Fork repo to user's GitHub
 2. GitHub Actions workflow runs
-3. Creates R2 bucket, KV namespace, D1 database
-4. Runs D1 schema migration
-5. Builds Zig WASM
-6. Deploys Worker via Wrangler
+3. Creates R2 bucket + Durable Object bindings
+4. Builds Zig WASM
+5. Deploys Worker via Wrangler
 
 ### Manual Deploy
 
@@ -310,25 +303,31 @@ cd gitmode
 
 ## Development Phases
 
-### Phase 1 — MVP (current)
+### Phase 1 — MVP (complete)
 - [x] Zig WASM engine (SHA-1, packfile, delta, zlib, protocol)
 - [x] Git smart HTTP (info-refs, upload-pack, receive-pack)
-- [x] R2 object storage + KV refs + D1 metadata
+- [x] R2 object storage + DO SQLite (refs, metadata)
 - [x] Server-side checkout (worktree materialization)
 - [x] Deploy button + GitHub Actions
-- [ ] vinext UI (repo browser, commit history, file viewer)
-- [ ] Test with real git client
+- [x] vinext UI (10 pages: repo browser, commit history, file viewer, etc.)
+- [x] REST API (35+ endpoints: CRUD, merge, cherry-pick, diff, log, stats)
+- [x] SSH transport
+- [x] Performance optimizations (batch writes, incremental worktree, optimistic cache)
+- [x] Integration tests (87 tests)
+- [x] Performance benchmarks
 
-### Phase 2 — Full Git
-- [ ] libgit2 compiled to WASM (diff, blame, merge)
-- [ ] SSH transport
-- [ ] Git LFS (R2 backend)
-- [ ] Protocol v2
+### Phase 2 — Production Ready
+- [ ] Authentication (API key / JWT + permissions table)
+- [ ] Git protocol v2
+- [ ] Webhooks on push
+- [ ] Branch protection rules
+- [ ] Wire up libgit2 blame to R2 ODB
 - [ ] Shallow clone support
+- [ ] Git LFS (R2 backend)
 
 ### Phase 3 — Platform
-- [ ] Authentication (GitHub OAuth, SSH keys)
-- [ ] Webhooks on push
+- [ ] Pull request model via API
+- [ ] Code search via DO SQLite or Workers AI
+- [ ] Web editor (edit files, create commits from UI)
+- [ ] Template repos / server-side fork
 - [ ] CI/CD integration (trigger Workers on push)
-- [ ] Web editor (edit files directly, create commits from UI)
-- [ ] API (REST + GraphQL for programmatic access)

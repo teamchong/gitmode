@@ -11,6 +11,7 @@
 
 import { GitEngine, OBJ_TREE, OBJ_BLOB, OBJ_COMMIT } from "./git-engine";
 import type { Env } from "./env";
+import type { ObjectCache } from "./packfile-reader";
 
 /**
  * Materialize the tree at `commitSha` into R2 worktree files for `branch`.
@@ -23,26 +24,27 @@ export async function materializeWorktree(
   branch: string,
   commitSha: string,
   oldCommitSha?: string,
+  objectCache?: ObjectCache,
 ): Promise<void> {
-  const newTree = await getTreeSha(engine, commitSha);
+  const newTree = await getTreeSha(engine, commitSha, objectCache);
   const prefix = `${repoPath}/worktrees/${branch}/`;
 
   // Collect new tree files
   const newFiles = new Map<string, string>(); // filepath -> blobSha
-  await walkTree(engine, newTree, "", newFiles);
+  await walkTree(engine, newTree, "", newFiles, objectCache);
 
   if (oldCommitSha) {
     // Incremental: diff old tree vs new tree, only write changes
     let oldTree: string | null = null;
     try {
-      oldTree = await getTreeSha(engine, oldCommitSha);
+      oldTree = await getTreeSha(engine, oldCommitSha, objectCache);
     } catch {
       // old commit not readable, fall through to full write
     }
 
     if (oldTree) {
       const oldFiles = new Map<string, string>();
-      await walkTree(engine, oldTree, "", oldFiles);
+      await walkTree(engine, oldTree, "", oldFiles, objectCache);
 
       const writes: Promise<void>[] = [];
       const deletes: string[] = [];
@@ -51,8 +53,7 @@ export async function materializeWorktree(
       for (const [path, sha] of newFiles) {
         const oldSha = oldFiles.get(path);
         if (oldSha !== sha) {
-          // New or changed — write it
-          writes.push(writeBlobToWorktree(engine, env, repoPath, branch, path, sha));
+          writes.push(writeBlobToWorktree(engine, env, repoPath, branch, path, sha, objectCache));
         }
       }
 
@@ -76,13 +77,25 @@ export async function materializeWorktree(
   await deleteByPrefix(env.OBJECTS, prefix);
   const writes: Promise<void>[] = [];
   for (const [filepath, blobSha] of newFiles) {
-    writes.push(writeBlobToWorktree(engine, env, repoPath, branch, filepath, blobSha));
+    writes.push(writeBlobToWorktree(engine, env, repoPath, branch, filepath, blobSha, objectCache));
   }
   await Promise.all(writes);
 }
 
-async function getTreeSha(engine: GitEngine, commitSha: string): Promise<string> {
-  const commit = await engine.readObject(commitSha);
+async function readObjectCached(
+  engine: GitEngine,
+  sha: string,
+  cache?: ObjectCache,
+): Promise<{ type: number; content: Uint8Array } | null> {
+  if (cache) {
+    const cached = cache.get(sha);
+    if (cached) return { type: cached.type, content: cached.data };
+  }
+  return engine.readObject(sha);
+}
+
+async function getTreeSha(engine: GitEngine, commitSha: string, cache?: ObjectCache): Promise<string> {
+  const commit = await readObjectCached(engine, commitSha, cache);
   if (!commit || commit.type !== OBJ_COMMIT) {
     throw new Error(`Cannot read commit ${commitSha}`);
   }
@@ -99,9 +112,10 @@ async function walkTree(
   engine: GitEngine,
   treeSha: string,
   pathPrefix: string,
-  files: Map<string, string>
+  files: Map<string, string>,
+  cache?: ObjectCache,
 ): Promise<void> {
-  const tree = await engine.readObject(treeSha);
+  const tree = await readObjectCached(engine, treeSha, cache);
   if (!tree || tree.type !== OBJ_TREE) {
     throw new Error(`Cannot read tree ${treeSha}`);
   }
@@ -126,7 +140,7 @@ async function walkTree(
     const fullPath = pathPrefix ? `${pathPrefix}/${name}` : name;
 
     if (mode === "40000") {
-      await walkTree(engine, sha, fullPath, files);
+      await walkTree(engine, sha, fullPath, files, cache);
     } else {
       files.set(fullPath, sha);
     }
@@ -142,9 +156,10 @@ async function writeBlobToWorktree(
   repoPath: string,
   branch: string,
   filepath: string,
-  blobSha: string
+  blobSha: string,
+  cache?: ObjectCache,
 ): Promise<void> {
-  const obj = await engine.readObject(blobSha);
+  const obj = await readObjectCached(engine, blobSha, cache);
   if (!obj || obj.type !== OBJ_BLOB) {
     console.error(`checkout: cannot read blob ${blobSha} for ${filepath}`);
     return;
