@@ -578,8 +578,478 @@ describe("D1 Metadata", () => {
 });
 
 // ============================================================
+// Packfile roundtrip (build + parse)
+// ============================================================
+describe("Packfile", () => {
+  let engine: GitEngine;
+
+  beforeEach(async () => {
+    engine = new GitEngine(env, "pack/repo");
+    const listed = await env.OBJECTS.list({ prefix: "pack/repo/" });
+    for (const obj of listed.objects) {
+      await env.OBJECTS.delete(obj.key);
+    }
+  });
+
+  it("should build a packfile and unpack it back", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+    const { unpackPackfile } = await import("../src/packfile-reader");
+
+    // Store objects in R2
+    const blob1Content = encoder.encode("file one content");
+    const blob1Sha = await engine.storeObject(OBJ_BLOB, blob1Content);
+
+    const blob2Content = encoder.encode("file two content");
+    const blob2Sha = await engine.storeObject(OBJ_BLOB, blob2Content);
+
+    const treeContent = concatBytes(
+      buildTreeEntry("100644", "one.txt", hexToBytes(blob1Sha)),
+      buildTreeEntry("100644", "two.txt", hexToBytes(blob2Sha))
+    );
+    const treeSha = await engine.storeObject(OBJ_TREE, treeContent);
+
+    const commitText = `tree ${treeSha}\nauthor A <a@a.com> 1700000000 +0000\ncommitter A <a@a.com> 1700000000 +0000\n\npack test\n`;
+    const commitSha = await engine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+
+    // Build packfile
+    const pack = await buildPackfile(engine, [commitSha, treeSha, blob1Sha, blob2Sha]);
+    expect(pack.length).toBeGreaterThan(32);
+
+    // Verify packfile header
+    expect(decoder.decode(pack.slice(0, 4))).toBe("PACK");
+    const version = (pack[4] << 24) | (pack[5] << 16) | (pack[6] << 8) | pack[7];
+    expect(version).toBe(2);
+    const numObjects = (pack[8] << 24) | (pack[9] << 16) | (pack[10] << 8) | pack[11];
+    expect(numObjects).toBe(4);
+
+    // Now unpack into a different repo to verify roundtrip
+    const engine2 = new GitEngine(env, "pack/repo2");
+    await unpackPackfile(engine2, pack);
+
+    // Verify all objects survived the roundtrip
+    const blob1 = await engine2.readObject(blob1Sha);
+    expect(blob1).not.toBeNull();
+    expect(blob1!.type).toBe(OBJ_BLOB);
+    expect(decoder.decode(blob1!.content)).toBe("file one content");
+
+    const blob2 = await engine2.readObject(blob2Sha);
+    expect(blob2).not.toBeNull();
+    expect(decoder.decode(blob2!.content)).toBe("file two content");
+
+    const tree = await engine2.readObject(treeSha);
+    expect(tree).not.toBeNull();
+    expect(tree!.type).toBe(OBJ_TREE);
+
+    const commit = await engine2.readObject(commitSha);
+    expect(commit).not.toBeNull();
+    expect(commit!.type).toBe(OBJ_COMMIT);
+  });
+});
+
+// ============================================================
+// HTTP receive-pack (push via HTTP POST)
+// ============================================================
+describe("HTTP receive-pack", () => {
+  beforeEach(async () => {
+    const listed = await env.OBJECTS.list({ prefix: "push/repo/" });
+    for (const obj of listed.objects) {
+      await env.OBJECTS.delete(obj.key);
+    }
+    const kvList = await env.REFS.list({ prefix: "push/repo/" });
+    for (const key of kvList.keys) {
+      await env.REFS.delete(key.name);
+    }
+  });
+
+  it("should accept a push with packfile and update refs", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+
+    // First, store objects in a temp engine to build a valid packfile
+    const tmpEngine = new GitEngine(env, "push/tmp");
+    const blobContent = encoder.encode("pushed file\n");
+    const blobSha = await tmpEngine.storeObject(OBJ_BLOB, blobContent);
+    const treeContent = buildTreeEntry("100644", "hello.txt", hexToBytes(blobSha));
+    const treeSha = await tmpEngine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor Push User <push@test.com> 1700000000 +0000\ncommitter Push User <push@test.com> 1700000000 +0000\n\npush test\n`;
+    const commitSha = await tmpEngine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+
+    const packData = await buildPackfile(tmpEngine, [commitSha, treeSha, blobSha]);
+
+    // Build receive-pack body:
+    //   pkt-line: "<old-sha> <new-sha> <refname>\0<capabilities>\n"
+    //   flush
+    //   packfile data
+    const ZERO = "0".repeat(40);
+    const refLine = `${ZERO} ${commitSha} refs/heads/main\0report-status side-band-64k\n`;
+    const body = concatBytes(
+      encodePktLine(refLine),
+      FLUSH_PKT,
+      packData
+    );
+
+    const response = await SELF.fetch(
+      "http://localhost/push/repo.git/git-receive-pack",
+      {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/x-git-receive-pack-request" },
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe(
+      "application/x-git-receive-pack-result"
+    );
+
+    // Parse response — should contain "unpack ok" and "ok refs/heads/main"
+    const responseBody = new Uint8Array(await response.arrayBuffer());
+    const responseText = decoder.decode(responseBody);
+    expect(responseText).toContain("unpack ok");
+    expect(responseText).toContain("ok refs/heads/main");
+
+    // Verify ref was updated in KV
+    const pushEngine = new GitEngine(env, "push/repo");
+    const ref = await pushEngine.getRef("heads/main");
+    expect(ref).toBe(commitSha);
+
+    // Verify objects are stored in R2
+    const blob = await pushEngine.readObject(blobSha);
+    expect(blob).not.toBeNull();
+    expect(decoder.decode(blob!.content)).toBe("pushed file\n");
+  });
+
+  it("should reject non-fast-forward push", async () => {
+    // Set up existing ref
+    const pushEngine = new GitEngine(env, "push/repo");
+    const blobSha = await pushEngine.storeObject(OBJ_BLOB, encoder.encode("existing"));
+    const treeContent = buildTreeEntry("100644", "f.txt", hexToBytes(blobSha));
+    const treeSha = await pushEngine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor A <a@a.com> 1700000000 +0000\ncommitter A <a@a.com> 1700000000 +0000\n\nexisting\n`;
+    const existingSha = await pushEngine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+    await pushEngine.setRef("heads/main", existingSha);
+
+    // Try to push with wrong old SHA
+    const wrongOld = "f".repeat(40);
+    const newSha = "a".repeat(40);
+    const refLine = `${wrongOld} ${newSha} refs/heads/main\0report-status\n`;
+    const body = concatBytes(
+      encodePktLine(refLine),
+      FLUSH_PKT
+      // no packfile needed — ref update will fail first
+    );
+
+    const response = await SELF.fetch(
+      "http://localhost/push/repo.git/git-receive-pack",
+      { method: "POST", body }
+    );
+
+    const responseText = decoder.decode(new Uint8Array(await response.arrayBuffer()));
+    expect(responseText).toContain("non-fast-forward");
+
+    // Ref should not have changed
+    const ref = await pushEngine.getRef("heads/main");
+    expect(ref).toBe(existingSha);
+  });
+});
+
+// ============================================================
+// HTTP upload-pack (clone/fetch via HTTP POST)
+// ============================================================
+describe("HTTP upload-pack", () => {
+  let engine: GitEngine;
+  let commitSha: string;
+  let blobSha: string;
+
+  beforeEach(async () => {
+    engine = new GitEngine(env, "clone/repo");
+    const listed = await env.OBJECTS.list({ prefix: "clone/repo/" });
+    for (const obj of listed.objects) {
+      await env.OBJECTS.delete(obj.key);
+    }
+    const kvList = await env.REFS.list({ prefix: "clone/repo/" });
+    for (const key of kvList.keys) {
+      await env.REFS.delete(key.name);
+    }
+
+    // Seed a repo with objects
+    const content = encoder.encode("cloned content\n");
+    blobSha = await engine.storeObject(OBJ_BLOB, content);
+    const treeContent = buildTreeEntry("100644", "file.txt", hexToBytes(blobSha));
+    const treeSha = await engine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor A <a@a.com> 1700000000 +0000\ncommitter A <a@a.com> 1700000000 +0000\n\nclone test\n`;
+    commitSha = await engine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+    await engine.setRef("heads/main", commitSha);
+    await engine.setHead("ref: refs/heads/main");
+  });
+
+  it("should serve objects in a packfile for clone", async () => {
+    // Build upload-pack request: want <sha> + done
+    const wantLine = `want ${commitSha} side-band-64k\n`;
+    const body = concatBytes(
+      encodePktLine(wantLine),
+      FLUSH_PKT,
+      encodePktLine("done\n"),
+      FLUSH_PKT
+    );
+
+    const response = await SELF.fetch(
+      "http://localhost/clone/repo.git/git-upload-pack",
+      { method: "POST", body }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe(
+      "application/x-git-upload-pack-result"
+    );
+
+    const responseBody = new Uint8Array(await response.arrayBuffer());
+    const responseText = decoder.decode(responseBody);
+
+    // Should contain NAK (no common objects with client)
+    expect(responseText).toContain("NAK");
+
+    // Extract sideband data — find PACK signature inside the response
+    // The packfile is wrapped in sideband pkt-lines (channel 1)
+    let packFound = false;
+    for (let i = 0; i < responseBody.length - 4; i++) {
+      if (
+        responseBody[i] === 0x50 && // P
+        responseBody[i + 1] === 0x41 && // A
+        responseBody[i + 2] === 0x43 && // C
+        responseBody[i + 3] === 0x4b // K
+      ) {
+        packFound = true;
+        break;
+      }
+    }
+    expect(packFound).toBe(true);
+  });
+
+  it("should return error for empty wants", async () => {
+    const response = await SELF.fetch(
+      "http://localhost/clone/repo.git/git-upload-pack",
+      {
+        method: "POST",
+        body: concatBytes(FLUSH_PKT, encodePktLine("done\n"), FLUSH_PKT),
+      }
+    );
+    expect(response.status).toBe(400);
+  });
+});
+
+// ============================================================
+// Full push → info-refs → clone cycle (end-to-end HTTP)
+// ============================================================
+describe("Full HTTP push-clone cycle", () => {
+  const repoName = "cycle/fulltest";
+
+  beforeEach(async () => {
+    const listed = await env.OBJECTS.list({ prefix: `${repoName}/` });
+    for (const obj of listed.objects) {
+      await env.OBJECTS.delete(obj.key);
+    }
+    const kvList = await env.REFS.list({ prefix: `${repoName}/` });
+    for (const key of kvList.keys) {
+      await env.REFS.delete(key.name);
+    }
+  });
+
+  it("should push objects, advertise refs, then clone them back", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+    const { unpackPackfile } = await import("../src/packfile-reader");
+
+    // 1. Store objects locally and build a packfile
+    const tmpEngine = new GitEngine(env, "cycle/tmp");
+    const fileContent = encoder.encode("full cycle test content\n");
+    const blobSha = await tmpEngine.storeObject(OBJ_BLOB, fileContent);
+    const treeContent = buildTreeEntry("100644", "readme.txt", hexToBytes(blobSha));
+    const treeSha = await tmpEngine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor Cycle <c@c.com> 1700000000 +0000\ncommitter Cycle <c@c.com> 1700000000 +0000\n\nfull cycle\n`;
+    const commitSha = await tmpEngine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+    const packData = await buildPackfile(tmpEngine, [commitSha, treeSha, blobSha]);
+
+    // 2. PUSH via HTTP receive-pack
+    const ZERO = "0".repeat(40);
+    const pushBody = concatBytes(
+      encodePktLine(`${ZERO} ${commitSha} refs/heads/main\0report-status side-band-64k\n`),
+      FLUSH_PKT,
+      packData
+    );
+
+    const pushResp = await SELF.fetch(
+      `http://localhost/${repoName}.git/git-receive-pack`,
+      { method: "POST", body: pushBody }
+    );
+    expect(pushResp.status).toBe(200);
+    const pushText = decoder.decode(new Uint8Array(await pushResp.arrayBuffer()));
+    expect(pushText).toContain("unpack ok");
+    expect(pushText).toContain("ok refs/heads/main");
+
+    // 3. INFO-REFS — verify the commit is advertised
+    const infoResp = await SELF.fetch(
+      `http://localhost/${repoName}.git/info/refs?service=git-upload-pack`
+    );
+    expect(infoResp.status).toBe(200);
+    const infoText = decoder.decode(new Uint8Array(await infoResp.arrayBuffer()));
+    expect(infoText).toContain(commitSha);
+
+    // 4. CLONE via HTTP upload-pack
+    const cloneBody = concatBytes(
+      encodePktLine(`want ${commitSha} side-band-64k\n`),
+      FLUSH_PKT,
+      encodePktLine("done\n"),
+      FLUSH_PKT
+    );
+
+    const cloneResp = await SELF.fetch(
+      `http://localhost/${repoName}.git/git-upload-pack`,
+      { method: "POST", body: cloneBody }
+    );
+    expect(cloneResp.status).toBe(200);
+
+    // Extract the packfile from the sideband response
+    const cloneData = new Uint8Array(await cloneResp.arrayBuffer());
+
+    // Find PACK in the sideband-wrapped response and extract all pack data
+    const extractedPack = extractPackFromSideband(cloneData);
+    expect(extractedPack).not.toBeNull();
+    expect(extractedPack!.length).toBeGreaterThan(20);
+
+    // 5. Unpack the received packfile into a fresh engine
+    const cloneEngine = new GitEngine(env, "cycle/cloned");
+    await unpackPackfile(cloneEngine, extractedPack!);
+
+    // 6. Verify all objects survived the full cycle
+    const clonedBlob = await cloneEngine.readObject(blobSha);
+    expect(clonedBlob).not.toBeNull();
+    expect(clonedBlob!.type).toBe(OBJ_BLOB);
+    expect(decoder.decode(clonedBlob!.content)).toBe("full cycle test content\n");
+
+    const clonedCommit = await cloneEngine.readObject(commitSha);
+    expect(clonedCommit).not.toBeNull();
+    expect(clonedCommit!.type).toBe(OBJ_COMMIT);
+    const clonedCommitText = decoder.decode(clonedCommit!.content);
+    expect(clonedCommitText).toContain(`tree ${treeSha}`);
+    expect(clonedCommitText).toContain("full cycle");
+  });
+});
+
+// ============================================================
+// libgit2 WASM exports
+// ============================================================
+describe("libgit2 exports", () => {
+  let wasm: WasmEngine;
+
+  beforeAll(async () => {
+    wasm = await WasmEngine.create();
+  });
+
+  it("should have libgit2_init export", () => {
+    expect(typeof wasm.exports.libgit2_init).toBe("function");
+  });
+
+  it("should have libgit2_shutdown export", () => {
+    expect(typeof wasm.exports.libgit2_shutdown).toBe("function");
+  });
+
+  it("should have libgit2_diff export", () => {
+    expect(typeof wasm.exports.libgit2_diff).toBe("function");
+  });
+
+  it("should have libgit2_revwalk export", () => {
+    expect(typeof wasm.exports.libgit2_revwalk).toBe("function");
+  });
+
+  it("should have libgit2_blame export", () => {
+    expect(typeof wasm.exports.libgit2_blame).toBe("function");
+  });
+
+  it("should initialize libgit2 without crashing", () => {
+    const result = wasm.exports.libgit2_init();
+    // -1 = ODB host imports not wired, but the init itself should not crash
+    // 0 = success, negative = expected failure without ODB
+    expect(typeof result).toBe("number");
+  });
+});
+
+// ============================================================
+// Worktree after push (via receive-pack)
+// ============================================================
+describe("Worktree via push", () => {
+  beforeEach(async () => {
+    const listed = await env.OBJECTS.list({ prefix: "wtp/repo/" });
+    for (const obj of listed.objects) {
+      await env.OBJECTS.delete(obj.key);
+    }
+    const kvList = await env.REFS.list({ prefix: "wtp/repo/" });
+    for (const key of kvList.keys) {
+      await env.REFS.delete(key.name);
+    }
+  });
+
+  it("should materialize worktree files after receive-pack", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+
+    // Build objects
+    const tmpEngine = new GitEngine(env, "wtp/tmp");
+    const fileContent = encoder.encode("worktree pushed content\n");
+    const blobSha = await tmpEngine.storeObject(OBJ_BLOB, fileContent);
+    const treeContent = buildTreeEntry("100644", "index.html", hexToBytes(blobSha));
+    const treeSha = await tmpEngine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor W <w@w.com> 1700000000 +0000\ncommitter W <w@w.com> 1700000000 +0000\n\nwt push\n`;
+    const commitSha = await tmpEngine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+    const packData = await buildPackfile(tmpEngine, [commitSha, treeSha, blobSha]);
+
+    // Push
+    const ZERO = "0".repeat(40);
+    const pushBody = concatBytes(
+      encodePktLine(`${ZERO} ${commitSha} refs/heads/main\0report-status side-band-64k\n`),
+      FLUSH_PKT,
+      packData
+    );
+
+    const response = await SELF.fetch(
+      "http://localhost/wtp/repo.git/git-receive-pack",
+      { method: "POST", body: pushBody }
+    );
+    expect(response.status).toBe(200);
+
+    // Verify worktree was materialized
+    const worktreeFile = await env.OBJECTS.get("wtp/repo/worktrees/main/index.html");
+    expect(worktreeFile).not.toBeNull();
+    expect(await worktreeFile!.text()).toBe("worktree pushed content\n");
+  });
+});
+
+// ============================================================
 // Helpers
 // ============================================================
+
+/** Extract packfile data from a sideband-64k wrapped upload-pack response */
+function extractPackFromSideband(data: Uint8Array): Uint8Array | null {
+  const packChunks: Uint8Array[] = [];
+  let offset = 0;
+
+  while (offset < data.length) {
+    const pkt = decodePktLine(data, offset);
+    if (!pkt) break;
+    offset = pkt.nextOffset;
+
+    if (pkt.type === "flush") continue;
+    if (pkt.type !== "data" || !pkt.payload || pkt.payload.length === 0) continue;
+
+    // Check sideband channel
+    const channel = pkt.payload[0];
+    if (channel === 0x01) {
+      // Data channel — pack data
+      packChunks.push(pkt.payload.slice(1));
+    }
+    // channel 0x02 = progress, 0x03 = error — skip
+  }
+
+  if (packChunks.length === 0) return null;
+  return concatBytes(...packChunks);
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
