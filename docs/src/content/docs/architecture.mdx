@@ -1,0 +1,86 @@
+---
+title: Architecture
+description: How gitmode works under the hood.
+---
+
+## Overview
+
+![Architecture](/gitmode/architecture.svg)
+
+gitmode runs entirely on Cloudflare's edge infrastructure with three components:
+
+| Component | Role |
+|-----------|------|
+| **Worker** | HTTP router — matches git protocol and REST API routes, forwards to Durable Object |
+| **RepoStore DO** | Per-repo Durable Object with embedded SQLite for refs, HEAD, metadata, commit index |
+| **R2** | Object storage for git objects (blobs, trees, commits, tags) as zlib-compressed loose objects |
+
+## Request Flow
+
+1. **Git client** sends HTTP request (e.g., `git push`)
+2. **Worker** matches the URL pattern, extracts owner/repo, gets the RepoStore DO handle
+3. **Worker** forwards the request to the DO with action headers (`x-action`, `x-repo-path`)
+4. **RepoStore DO** handles the action:
+   - For git protocol: delegates to `handleInfoRefs`, `handleUploadPack`, or `handleReceivePack`
+   - For REST API: delegates to `GitPorcelain` methods via `handleApiAction`
+5. **GitEngine** reads/writes objects from R2 and refs from SQLite
+6. **Zig WASM** handles binary operations: SHA-1 hashing, zlib, packfile parsing, delta encoding
+
+## Data Model
+
+### SQLite Tables (per DO)
+
+```sql
+-- Branch and tag refs
+CREATE TABLE refs (
+  name TEXT PRIMARY KEY,  -- e.g. "heads/main", "tags/v1.0"
+  sha TEXT NOT NULL
+);
+
+-- HEAD pointer (symbolic ref or detached SHA)
+CREATE TABLE head (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  value TEXT NOT NULL     -- e.g. "ref: refs/heads/main" or a raw SHA
+);
+
+-- Repository metadata
+CREATE TABLE repo_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  visibility TEXT DEFAULT 'public',
+  default_branch TEXT DEFAULT 'main',
+  created_at TEXT NOT NULL,
+  updated_at TEXT
+);
+
+-- Commit index for fast log queries
+CREATE TABLE commits (
+  sha TEXT PRIMARY KEY,
+  author TEXT NOT NULL,
+  message TEXT NOT NULL,
+  timestamp INTEGER NOT NULL
+);
+```
+
+### R2 Object Layout
+
+Git objects are stored at `{owner}/{repo}/{sha}` as zlib-compressed data with a type prefix byte:
+
+| Type | Value | Description |
+|------|-------|-------------|
+| blob | 1 | File content |
+| tree | 2 | Directory listing (mode + name + SHA entries) |
+| commit | 3 | Commit metadata (tree, parents, author, message) |
+| tag | 4 | Annotated tag (object, type, tag name, tagger, message) |
+
+## Consistency Model
+
+Each repository maps to exactly one Durable Object instance. All ref reads and writes go through the DO's SQLite, which provides:
+
+- **Strong consistency** — reads always see the latest writes
+- **Serialized updates** — concurrent pushes are serialized by the DO
+- **Atomic multi-ref updates** — a single push can update multiple refs atomically
+
+R2 objects are immutable (content-addressed by SHA-1), so they don't require coordination.

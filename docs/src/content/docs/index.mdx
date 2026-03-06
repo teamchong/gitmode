@@ -1,0 +1,44 @@
+---
+title: gitmode
+description: Serverless git hosting on Cloudflare Workers with Zig WASM engine.
+template: splash
+hero:
+  tagline: Full git server on Cloudflare Workers. Push, clone, branch, merge — all serverless with zero infrastructure.
+  actions:
+    - text: Get Started
+      link: /gitmode/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: REST API
+      link: /gitmode/rest-api/
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## Features
+
+<CardGrid>
+  <Card title="Full Git Protocol" icon="pencil">
+    Smart HTTP transport with info-refs, upload-pack, and receive-pack. Works with standard `git clone`, `git push`, `git fetch`.
+  </Card>
+  <Card title="REST API" icon="setting">
+    30+ endpoints for programmatic access. Init repos, commit files, create branches, merge, cherry-pick, revert — all via JSON.
+  </Card>
+  <Card title="Zig WASM Engine" icon="rocket">
+    SHA-1 hashing, zlib compression, packfile parsing, delta encoding — all in Zig compiled to WASM with SIMD acceleration.
+  </Card>
+  <Card title="Durable Objects + R2" icon="puzzle">
+    Each repo is a Durable Object with embedded SQLite for refs and metadata. Git objects stored in R2 as compressed loose objects.
+  </Card>
+</CardGrid>
+
+## How It Works
+
+```
+Git Client  ──HTTP──▶  Cloudflare Worker  ──▶  RepoStore DO (SQLite)
+                                           ──▶  R2 (git objects)
+                                           ──▶  Zig WASM (SHA-1, zlib, packfiles)
+```
+
+Every repository maps to a single Durable Object instance. The DO's embedded SQLite stores refs (branches, tags, HEAD) and metadata. Git objects (blobs, trees, commits, tags) live in R2 as zlib-compressed loose objects. The Zig WASM module handles all binary operations: SHA-1 hashing, zlib inflate/deflate, packfile parsing, and delta encoding.

@@ -1,0 +1,125 @@
+---
+title: Deployment
+description: Deploy gitmode to Cloudflare Workers.
+---
+
+## Prerequisites
+
+- Cloudflare account with Workers Paid plan (for Durable Objects)
+- R2 bucket for git object storage
+- Wrangler CLI (`pnpm add -g wrangler`)
+
+## Wrangler Configuration
+
+Your `wrangler.jsonc` should include:
+
+```jsonc
+{
+  "name": "gitmode",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-01-01",
+  "r2_buckets": [
+    {
+      "binding": "OBJECTS",
+      "bucket_name": "gitmode-objects"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPO_STORE",
+        "class_name": "RepoStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RepoStore"]
+    }
+  ]
+}
+```
+
+## Deploy
+
+```bash
+# Build WASM (if not already built)
+pnpm run build:wasm
+
+# Deploy to Cloudflare
+pnpm run deploy
+```
+
+## Create R2 Bucket
+
+If you haven't created the R2 bucket yet:
+
+```bash
+wrangler r2 bucket create gitmode-objects
+```
+
+## Verify Deployment
+
+After deploying, verify the server is running:
+
+```bash
+# Should return "gitmode"
+curl https://your-worker.your-subdomain.workers.dev/
+
+# Initialize a repo
+curl -X POST https://your-worker.your-subdomain.workers.dev/api/repos/myuser/myrepo/init
+
+# Clone it
+git clone https://your-worker.your-subdomain.workers.dev/myuser/myrepo.git
+```
+
+## Custom Domain
+
+To use a custom domain, add a route in your Wrangler config or use the Cloudflare dashboard:
+
+```jsonc
+{
+  "routes": [
+    { "pattern": "git.example.com/*", "zone_name": "example.com" }
+  ]
+}
+```
+
+## Limits
+
+| Resource | Limit |
+|----------|-------|
+| Worker request size | 100MB (Workers Paid) |
+| R2 object size | 5TB per object |
+| Durable Object storage | 10GB SQLite per DO |
+| Durable Object CPU | 30s per request |
+| R2 operations | 10M Class A / 100M Class B per month (free tier) |
+
+For typical git repositories, these limits are more than sufficient. Large binary files (LFS) are stored as regular git objects in R2.
+
+## GitHub Actions
+
+To auto-deploy on push:
+
+```yaml
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths-ignore: [docs/**]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```

@@ -1,0 +1,77 @@
+---
+title: Getting Started
+description: Set up and deploy gitmode.
+---
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) 22+
+- [pnpm](https://pnpm.io/)
+- [Zig](https://ziglang.org/) 0.15+ (for WASM builds)
+- [Binaryen](https://github.com/WebAssembly/binaryen) (`wasm-opt`, `wasm-metadce`)
+- A [Cloudflare](https://cloudflare.com) account with Workers, R2, and Durable Objects
+
+## Setup
+
+```bash
+git clone https://github.com/teamchong/gitmode.git
+cd gitmode
+pnpm install
+```
+
+## Build WASM
+
+The Zig WASM module provides SHA-1, zlib, packfile parsing, and delta encoding:
+
+```bash
+pnpm run build:wasm
+```
+
+This compiles the Zig code, runs `wasm-metadce` to remove unused exports, and optimizes with `wasm-opt -Oz`.
+
+## Development
+
+Start a local dev server with Wrangler:
+
+```bash
+pnpm run dev
+```
+
+Then use git against the local server:
+
+```bash
+# Initialize a repo via REST API
+curl -X POST http://localhost:8787/api/repos/myuser/myrepo/init
+
+# Clone (will be empty initially)
+git clone http://localhost:8787/myuser/myrepo.git
+
+# Or commit files via REST API
+curl -X POST http://localhost:8787/api/repos/myuser/myrepo/commits \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ref": "main",
+    "message": "initial commit",
+    "author": "Your Name",
+    "email": "you@example.com",
+    "files": [{"path": "README.md", "content": "# My Repo"}]
+  }'
+```
+
+## Testing
+
+```bash
+# Unit + integration tests (vitest with miniflare)
+pnpm test
+
+# Conformance tests with real git CLI
+pnpm run test:conformance
+```
+
+## Deploy
+
+```bash
+pnpm run deploy
+```
+
+Ensure your `wrangler.jsonc` has the R2 bucket and Durable Object bindings configured.

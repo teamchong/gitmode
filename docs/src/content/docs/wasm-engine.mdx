@@ -1,0 +1,118 @@
+---
+title: WASM Engine
+description: Zig-compiled WASM module for git binary operations.
+---
+
+The core binary operations (SHA-1, zlib, packfiles, deltas) run in a Zig-compiled WASM module with SIMD acceleration. The optimized binary is 791KB after dead-code elimination and size optimization.
+
+## Build Pipeline
+
+```
+Zig 0.15 (ReleaseSmall)
+  → wasm-metadce (remove unused exports)
+  → wasm-opt -Oz (size optimization)
+  → 791KB final binary
+```
+
+Build command:
+
+```bash
+pnpm run build:wasm
+```
+
+## Exports
+
+The WASM module exports 27 functions organized by category:
+
+### Memory Management
+
+| Export | Description |
+|--------|-------------|
+| `memory` | Linear memory |
+| `alloc` | Allocate bytes in WASM heap |
+| `resetHeap` | Reset heap (arena allocator) |
+| `getHeapUsed` | Get current heap usage |
+
+### SHA-1
+
+| Export | Description |
+|--------|-------------|
+| `sha1_hash` | Hash raw bytes |
+| `sha1_hash_object` | Hash with git object header (e.g., `blob 5\0hello`) |
+
+### Zlib
+
+| Export | Description |
+|--------|-------------|
+| `zlib_inflate` | Decompress zlib data |
+| `zlib_inflate_tracked` | Decompress with size tracking |
+| `zlib_deflate` | Compress data |
+
+### Object Parsing
+
+| Export | Description |
+|--------|-------------|
+| `parse_object_header` | Parse `type size\0` header |
+| `serialize_object` | Create object with header |
+| `parse_tree` | Parse tree entries |
+
+### Packfile Operations
+
+| Export | Description |
+|--------|-------------|
+| `pack_parse_header` | Parse PACK header (magic, version, count) |
+| `pack_parse_entry_header` | Parse entry type and size |
+| `pack_build` | Build a packfile from objects |
+
+### Delta Encoding
+
+| Export | Description |
+|--------|-------------|
+| `delta_apply` | Apply delta instructions to base object |
+| `delta_create` | Create delta between two objects |
+
+### Pkt-Line
+
+| Export | Description |
+|--------|-------------|
+| `pktline_encode` | Encode data with 4-byte hex length prefix |
+| `pktline_decode` | Decode pkt-line framed data |
+
+### SIMD Utilities
+
+| Export | Description |
+|--------|-------------|
+| `simd_memeql` | SIMD-accelerated memory comparison |
+| `simd_memchr` | SIMD-accelerated byte search |
+
+### libgit2 Integration
+
+| Export | Description |
+|--------|-------------|
+| `libgit2_init` | Initialize libgit2 |
+| `libgit2_shutdown` | Shut down libgit2 |
+| `libgit2_diff` | Compute diff between trees |
+| `libgit2_revwalk` | Walk commit history |
+| `libgit2_blame` | Line-level blame |
+
+## Size Optimization
+
+The WASM binary was reduced from 1.2MB to 791KB (34% reduction) using:
+
+1. **wasm-metadce** — Dead code elimination based on an export graph. Only 27 exports are kept; all unreachable functions are removed. This reduced function count from ~3000+ to 1272.
+
+2. **wasm-opt -Oz** — Binaryen's aggressive size optimizer. Applies code folding, constant propagation, dead argument elimination, and instruction combining.
+
+Both tools require feature flags for the WASM features used:
+
+```bash
+--enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int
+```
+
+## Zig Source
+
+The WASM source lives in `wasm/` and is built with `zig build wasm -Doptimize=ReleaseSmall`. Key build settings:
+
+- `entry = .disabled` — no `_start` entry point (library mode)
+- `rdynamic = true` — export all public functions (required in Zig 0.15)
+- `stack_size = 4MB` — sufficient for deep tree recursion and large packfiles

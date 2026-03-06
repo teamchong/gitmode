@@ -1,0 +1,112 @@
+---
+title: Git Protocol
+description: Smart HTTP git transport implementation.
+---
+
+gitmode implements the [Git Smart HTTP protocol](https://git-scm.com/docs/http-protocol), enabling standard git clients to clone, fetch, and push.
+
+## Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/:owner/:repo.git/info/refs?service=git-upload-pack` | Ref advertisement for fetch/clone |
+| `GET` | `/:owner/:repo.git/info/refs?service=git-receive-pack` | Ref advertisement for push |
+| `POST` | `/:owner/:repo.git/git-upload-pack` | Pack negotiation and download |
+| `POST` | `/:owner/:repo.git/git-receive-pack` | Pack upload and ref update |
+| `GET` | `/:owner/:repo.git/HEAD` | Read HEAD ref |
+
+## Capabilities
+
+gitmode advertises these capabilities during ref advertisement:
+
+| Capability | Description |
+|------------|-------------|
+| `report-status` | Server reports per-ref update status |
+| `delete-refs` | Server accepts ref deletion (`git push --delete`) |
+| `multi_ack_detailed` | Multi-ack protocol for efficient fetch |
+| `side-band-64k` | Multiplexed data/progress/error channels |
+| `thin-pack` | Accept thin packs (base objects may be missing from pack) |
+| `ofs-delta` | Offset-based delta encoding |
+| `agent=gitmode/1.0` | Server identification |
+| `object-format=sha1` | SHA-1 object hashing |
+| `symref=HEAD:refs/heads/main` | Dynamic — reflects actual HEAD target |
+
+## Usage Examples
+
+### Clone
+
+```bash
+git clone http://localhost:8787/owner/repo.git
+```
+
+### Push
+
+```bash
+cd repo
+echo "hello" > file.txt
+git add file.txt
+git commit -m "add file"
+git push
+```
+
+### Branch Operations
+
+```bash
+# Create and push a branch
+git checkout -b feature
+git push -u origin feature
+
+# Delete a remote branch
+git push origin --delete feature
+```
+
+### Tags
+
+```bash
+# Lightweight tag
+git tag v1.0
+git push origin v1.0
+
+# Annotated tag
+git tag -a v2.0 -m "Release v2.0"
+git push --tags
+```
+
+## Protocol Flow
+
+### Clone/Fetch
+
+1. Client sends `GET /info/refs?service=git-upload-pack`
+2. Server returns ref list with capabilities
+3. Client sends `POST /git-upload-pack` with "want" lines (SHAs to fetch) and "have" lines (SHAs already held)
+4. Server builds a packfile containing requested objects, wrapped in sideband-64k framing
+5. Client unpacks and updates local refs
+
+### Push
+
+1. Client sends `GET /info/refs?service=git-receive-pack`
+2. Server returns ref list with capabilities
+3. Client sends `POST /git-receive-pack` with ref update commands and a packfile
+4. Server parses the packfile, stores objects in R2, updates refs in SQLite
+5. Server returns per-ref status report
+
+## Packfile Format
+
+The Zig WASM engine handles all packfile operations:
+
+- **Pack header parsing** — validates magic bytes (`PACK`), version (2), and object count
+- **Entry parsing** — reads variable-length type/size headers, decompresses with zlib
+- **Delta resolution** — applies OFS_DELTA and REF_DELTA instructions to reconstruct objects
+- **Pack building** — creates packfiles from a set of objects for upload-pack responses
+
+## Sideband Protocol
+
+Data from the server is multiplexed into channels:
+
+| Channel | Byte | Purpose |
+|---------|------|---------|
+| Pack data | `0x01` | Packfile bytes |
+| Progress | `0x02` | Human-readable progress messages |
+| Error | `0x03` | Error messages |
+
+Each sideband message is wrapped in a pkt-line (4-byte hex length prefix). Maximum payload per pkt-line is 65515 bytes (65520 total minus 4 header minus 1 channel byte).

@@ -11,3 +11,6 @@ wasm/libgit2-wasm/out/
 !src/wasm/*.wasm
 wrangler.toml.bak
 .claude/
+docs/node_modules/
+docs/dist/
+docs/.astro/

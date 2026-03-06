@@ -1,0 +1,351 @@
+---
+title: REST API
+description: Programmatic API for all git operations.
+---
+
+All REST API endpoints use the base path `/api/repos/:owner/:repo`. Request and response bodies are JSON.
+
+## Repository
+
+### Initialize
+
+```http
+POST /api/repos/:owner/:repo/init
+```
+
+```json
+{ "defaultBranch": "main" }
+```
+
+Creates the repository with an empty HEAD pointing to the specified branch.
+
+## Files
+
+### Read File
+
+```http
+GET /api/repos/:owner/:repo/files?ref=main&path=src/index.ts
+```
+
+Returns the file content at the given ref and path:
+
+```json
+{ "content": "console.log('hi')", "size": 17 }
+```
+
+### List Files
+
+```http
+GET /api/repos/:owner/:repo/files?ref=main
+```
+
+Lists entries at the root tree:
+
+```json
+{
+  "files": [
+    { "path": "README.md", "mode": "100644", "type": "blob", "sha": "abc..." },
+    { "path": "src", "mode": "40000", "type": "tree", "sha": "def..." }
+  ]
+}
+```
+
+### List All Files
+
+```http
+GET /api/repos/:owner/:repo/files/all?ref=main
+```
+
+Recursively lists all files (blobs only):
+
+```json
+{
+  "files": [
+    { "path": "README.md", "mode": "100644", "type": "blob", "sha": "abc..." },
+    { "path": "src/index.ts", "mode": "100644", "type": "blob", "sha": "ghi..." }
+  ]
+}
+```
+
+## Commits
+
+### Create Commit
+
+```http
+POST /api/repos/:owner/:repo/commits
+```
+
+```json
+{
+  "ref": "main",
+  "message": "Add feature",
+  "author": "Alice",
+  "email": "alice@example.com",
+  "files": [
+    { "path": "feature.ts", "content": "export const x = 1;" },
+    { "path": "old-file.ts", "content": null }
+  ],
+  "timestamp": 1700000000
+}
+```
+
+Set `content` to `null` to delete a file. Returns `{ "sha": "abc..." }`.
+
+### Log
+
+```http
+GET /api/repos/:owner/:repo/log?ref=main&max=50
+```
+
+Returns commit history walking from the given ref:
+
+```json
+{
+  "commits": [
+    {
+      "sha": "abc...",
+      "tree": "def...",
+      "parents": ["ghi..."],
+      "author": "Alice",
+      "authorEmail": "alice@example.com",
+      "authorTimestamp": 1700000000,
+      "committer": "Alice",
+      "committerEmail": "alice@example.com",
+      "committerTimestamp": 1700000000,
+      "message": "Add feature\n"
+    }
+  ]
+}
+```
+
+## Branches
+
+### List Branches
+
+```http
+GET /api/repos/:owner/:repo/branches
+```
+
+```json
+{
+  "branches": [
+    { "name": "main", "sha": "abc...", "isHead": true },
+    { "name": "feature", "sha": "def...", "isHead": false }
+  ]
+}
+```
+
+### Create Branch
+
+```http
+POST /api/repos/:owner/:repo/branches
+```
+
+```json
+{ "name": "feature", "startPoint": "main" }
+```
+
+`startPoint` defaults to HEAD if omitted.
+
+### Delete Branch
+
+```http
+DELETE /api/repos/:owner/:repo/branches/:name
+```
+
+Cannot delete the currently checked-out branch.
+
+### Rename Branch
+
+```http
+PATCH /api/repos/:owner/:repo/branches/:name
+```
+
+```json
+{ "newName": "feature-v2" }
+```
+
+Updates HEAD if it pointed to the old branch.
+
+## Checkout
+
+### Switch Branch
+
+```http
+POST /api/repos/:owner/:repo/checkout
+```
+
+```json
+{ "branch": "feature" }
+```
+
+## Tags
+
+### List Tags
+
+```http
+GET /api/repos/:owner/:repo/tags
+```
+
+```json
+{
+  "tags": [
+    { "name": "v1.0", "sha": "abc...", "type": "lightweight" },
+    {
+      "name": "v2.0", "sha": "def...", "type": "annotated",
+      "target": "ghi...", "tagger": "Alice", "message": "Release v2.0\n"
+    }
+  ]
+}
+```
+
+### Create Lightweight Tag
+
+```http
+POST /api/repos/:owner/:repo/tags
+```
+
+```json
+{ "name": "v1.0", "target": "main" }
+```
+
+### Create Annotated Tag
+
+```http
+POST /api/repos/:owner/:repo/tags
+```
+
+```json
+{
+  "name": "v2.0",
+  "tagger": "Alice",
+  "email": "alice@example.com",
+  "message": "Release v2.0"
+}
+```
+
+If `message` is present, an annotated tag object is created.
+
+### Delete Tag
+
+```http
+DELETE /api/repos/:owner/:repo/tags/:name
+```
+
+## Diff
+
+```http
+GET /api/repos/:owner/:repo/diff?a=<ref>&b=<ref>
+```
+
+Compares two refs. If `b` is omitted, diffs `a` against its parent commit.
+
+```json
+{
+  "entries": [
+    { "path": "feature.ts", "status": "added", "newSha": "abc..." },
+    { "path": "old.ts", "status": "deleted", "oldSha": "def..." },
+    { "path": "main.ts", "status": "modified", "oldSha": "ghi...", "newSha": "jkl..." }
+  ]
+}
+```
+
+## Merge
+
+```http
+POST /api/repos/:owner/:repo/merge
+```
+
+```json
+{
+  "target": "main",
+  "source": "feature",
+  "author": "Alice",
+  "email": "alice@example.com",
+  "message": "Merge feature into main"
+}
+```
+
+Returns the merge strategy used:
+
+```json
+{ "sha": "abc...", "strategy": "fast-forward" }
+```
+
+or for a three-way merge:
+
+```json
+{ "sha": "abc...", "strategy": "merge" }
+```
+
+Conflicts are resolved automatically (takes theirs for conflicting files).
+
+## Cherry-Pick
+
+```http
+POST /api/repos/:owner/:repo/cherry-pick
+```
+
+```json
+{
+  "commit": "<sha>",
+  "target": "main",
+  "author": "Alice",
+  "email": "alice@example.com"
+}
+```
+
+Applies the changes from the specified commit onto the target branch using three-way merge.
+
+## Revert
+
+```http
+POST /api/repos/:owner/:repo/revert
+```
+
+```json
+{
+  "commit": "<sha>",
+  "target": "main",
+  "author": "Alice",
+  "email": "alice@example.com"
+}
+```
+
+Creates a new commit that undoes the changes introduced by the specified commit.
+
+## Reset
+
+```http
+POST /api/repos/:owner/:repo/reset
+```
+
+```json
+{ "ref": "main", "target": "<sha>" }
+```
+
+Moves the branch ref to point at a different commit.
+
+## Rev-Parse
+
+```http
+GET /api/repos/:owner/:repo/rev-parse?ref=HEAD
+```
+
+Resolves a ref to a commit SHA. Supports: branch names, tag names, `HEAD`, `HEAD~N`, `HEAD^`, `HEAD^2`, raw SHAs.
+
+```json
+{ "sha": "abc..." }
+```
+
+## Show Object
+
+```http
+GET /api/repos/:owner/:repo/show?sha=<sha>
+```
+
+Reads a raw git object:
+
+```json
+{ "type": "commit", "size": 234, "content": "tree abc...\nparent ..." }
+```
