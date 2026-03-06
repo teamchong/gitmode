@@ -181,8 +181,14 @@ async function handleApiAction(
   switch (action) {
     // --- init ---
     case "init": {
-      const body = await request.json() as { defaultBranch?: string };
-      porcelain.init(body.defaultBranch);
+      let defaultBranch: string | undefined;
+      try {
+        const body = await request.json() as { defaultBranch?: string };
+        defaultBranch = body.defaultBranch;
+      } catch {
+        // Empty body is fine — use defaults
+      }
+      porcelain.init(defaultBranch);
       return Response.json({ ok: true });
     }
 
@@ -215,11 +221,14 @@ async function handleApiAction(
       const body = await request.json() as {
         ref: string;
         message: string;
-        author: string;
-        email: string;
+        author?: string;
+        email?: string;
         files: Array<{ path: string; content: string | null }>;
         timestamp?: number;
       };
+      if (!body.ref) throw new Error("Missing required field: ref");
+      if (!body.message) throw new Error("Missing required field: message");
+      if (!body.files || !Array.isArray(body.files)) throw new Error("Missing required field: files");
       const sha = await porcelain.commit({
         ref: body.ref,
         message: body.message,

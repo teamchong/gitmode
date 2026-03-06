@@ -39,6 +39,7 @@ export type { Env };
 
 const GIT_ROUTE = /^\/([^/]+)\/([^/]+?)\.git\/(.+)$/;
 const API_ROUTE = /^\/api\/repos\/([^/]+)\/([^/]+)(?:\/(.*))?$/;
+const LIST_REPOS_ROUTE = /^\/api\/repos(?:\/([^/]+))?\/?$/;
 
 function getStore(env: Env, repoPath: string) {
   const id = env.REPO_STORE.idFromName(repoPath);
@@ -49,6 +50,18 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // --- List repos ---
+    const listMatch = path.match(LIST_REPOS_ROUTE);
+    if (listMatch && request.method === "GET") {
+      const ownerFilter = listMatch[1];
+      try {
+        return await listRepos(env, ownerFilter);
+      } catch (err) {
+        console.error(`gitmode list-repos error: ${err}`);
+        return Response.json({ error: "Internal error" }, { status: 500 });
+      }
+    }
 
     // --- REST API ---
     const apiMatch = path.match(API_ROUTE);
@@ -83,6 +96,25 @@ export default {
     return new Response("gitmode\n", { status: 200 });
   },
 };
+
+async function listRepos(env: Env, ownerFilter?: string): Promise<Response> {
+  // Discover repos by listing R2 prefixes: {owner}/{repo}/objects/
+  const prefix = ownerFilter ? `${ownerFilter}/` : "";
+  const listed = await env.OBJECTS.list({ prefix, delimiter: "/objects/" });
+  const repos: Array<{ owner: string; name: string }> = [];
+  const seen = new Set<string>();
+
+  for (const prefix of listed.delimitedPrefixes) {
+    // prefix looks like "owner/repo/objects/"
+    const repoPath = prefix.replace(/\/objects\/$/, "");
+    if (seen.has(repoPath)) continue;
+    seen.add(repoPath);
+    const [owner, name] = repoPath.split("/");
+    if (owner && name) repos.push({ owner, name });
+  }
+
+  return Response.json({ repos });
+}
 
 function forwardToStore(
   store: Rpc.DurableObjectBranded,

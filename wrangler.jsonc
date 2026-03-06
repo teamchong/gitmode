@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gitmode",
-  "main": "./worker/index.ts",
+  "main": "./src/worker.ts",
   "compatibility_date": "2025-12-01",
   "compatibility_flags": ["nodejs_compat"],
 
@@ -32,10 +32,5 @@
       "globs": ["**/*.wasm"],
       "fallthrough": false
     }
-  ],
-
-  "assets": {
-    "directory": "./dist/client",
-    "not_found_handling": "none"
-  }
+  ]
 }

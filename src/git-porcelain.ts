@@ -227,11 +227,14 @@ export class GitPorcelain {
   async commit(opts: {
     ref: string;
     message: string;
-    author: string;
-    email: string;
+    author?: string;
+    email?: string;
     files: Array<{ path: string; content: Uint8Array | string | null }>;
     timestamp?: number;
   }): Promise<string> {
+    const author = opts.author || "unknown";
+    const email = opts.email || "unknown@unknown";
+
     // Auto-init: ensure repo metadata and HEAD exist so first commit works
     // even without an explicit init call
     this.engine.ensureRepo();
@@ -240,37 +243,52 @@ export class GitPorcelain {
     }
 
     const ts = opts.timestamp ?? Math.floor(Date.now() / 1000);
-    const parentSha = await this.resolveRef(opts.ref);
 
-    // Get base tree (or empty)
-    let baseTreeSha: string | null = null;
-    if (parentSha) {
-      const commit = await this.engine.readObject(parentSha);
-      if (commit && commit.type === OBJ_COMMIT) {
-        baseTreeSha = parseCommit(parentSha, commit.content).tree;
+    // Retry loop for optimistic concurrency — if the ref moved between
+    // reading and writing, re-apply changes on top of the new parent
+    const MAX_RETRIES = 5;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const parentSha = await this.resolveRef(opts.ref);
+
+      // Get base tree (or empty)
+      let baseTreeSha: string | null = null;
+      if (parentSha) {
+        const commit = await this.engine.readObject(parentSha);
+        if (commit && commit.type === OBJ_COMMIT) {
+          baseTreeSha = parseCommit(parentSha, commit.content).tree;
+        }
       }
+
+      // Apply file changes to tree
+      const newTreeSha = await this.applyChangesToTree(baseTreeSha, opts.files);
+
+      // Build commit
+      const lines: string[] = [`tree ${newTreeSha}`];
+      if (parentSha) lines.push(`parent ${parentSha}`);
+      lines.push(`author ${author} <${email}> ${ts} +0000`);
+      lines.push(`committer ${author} <${email}> ${ts} +0000`);
+      lines.push("");
+      lines.push(opts.message.endsWith("\n") ? opts.message : opts.message + "\n");
+      const commitSha = await this.engine.storeObject(OBJ_COMMIT, encoder.encode(lines.join("\n")));
+
+      // Optimistic lock: verify ref hasn't moved since we read it
+      const refName = this.refToStorageName(opts.ref);
+      if (refName) {
+        const currentSha = this.engine.getRef(refName);
+        if (currentSha !== parentSha) {
+          // Ref moved — retry with new parent
+          continue;
+        }
+        this.engine.setRef(refName, commitSha);
+      }
+
+      // Index commit metadata
+      this.engine.indexCommit(commitSha, `${author} <${email}>`, opts.message, ts);
+
+      return commitSha;
     }
 
-    // Apply file changes to tree
-    const newTreeSha = await this.applyChangesToTree(baseTreeSha, opts.files);
-
-    // Build commit
-    const lines: string[] = [`tree ${newTreeSha}`];
-    if (parentSha) lines.push(`parent ${parentSha}`);
-    lines.push(`author ${opts.author} <${opts.email}> ${ts} +0000`);
-    lines.push(`committer ${opts.author} <${opts.email}> ${ts} +0000`);
-    lines.push("");
-    lines.push(opts.message.endsWith("\n") ? opts.message : opts.message + "\n");
-    const commitSha = await this.engine.storeObject(OBJ_COMMIT, encoder.encode(lines.join("\n")));
-
-    // Update ref
-    const refName = this.refToStorageName(opts.ref);
-    if (refName) this.engine.setRef(refName, commitSha);
-
-    // Index commit metadata
-    this.engine.indexCommit(commitSha, `${opts.author} <${opts.email}>`, opts.message, ts);
-
-    return commitSha;
+    throw new Error("Failed to commit: ref was concurrently modified (too many retries)");
   }
 
   // === branch ===
@@ -1048,7 +1066,15 @@ export class GitPorcelain {
       // Both sides deleted
       if (!ours && !theirs) continue;
 
-      // Conflict: both modified differently — take theirs (agent-friendly default)
+      // Both sides modified differently from base
+      // For directories: recurse to merge contents
+      if (ours && theirs && ours.mode.startsWith("40") && theirs.mode.startsWith("40")) {
+        const mergedSub = await this.mergeTrees(base?.sha ?? "", ours.sha, theirs.sha);
+        result.push({ mode: "40000", name, sha: mergedSub });
+        continue;
+      }
+
+      // Conflict on files: take theirs (agent-friendly default)
       if (theirs) {
         result.push({ mode: theirs.mode, name, sha: theirs.sha });
       } else if (ours) {
