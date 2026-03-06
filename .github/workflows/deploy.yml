@@ -28,9 +28,8 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
-      - name: Install Binaryen (wasm-opt)
-        run: |
-          sudo apt-get update && sudo apt-get install -y binaryen
+      - name: Install Binaryen (wasm-opt, wasm-metadce)
+        run: pnpm add -g binaryen
 
       - name: Build libgit2 for WASM
         run: bash wasm/libgit2-wasm/build.sh
