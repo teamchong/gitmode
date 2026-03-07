@@ -248,15 +248,21 @@ export class GitEngine {
     if (shas.length === 0) return new Map();
     const sql = this.requireSql();
     const result = new Map<string, number>();
-    // SQLite handles IN clauses efficiently — batch in groups of 500
-    for (let i = 0; i < shas.length; i += 500) {
-      const batch = shas.slice(i, i + 500);
+    // Cloudflare DO SQLite limits to 100 bind variables
+    for (let i = 0; i < shas.length; i += 100) {
+      const batch = shas.slice(i, i + 100);
       const params = batch.map(() => "?").join(",");
       for (const row of sql.exec(`SELECT sha, size FROM file_sizes WHERE sha IN (${params})`, ...batch)) {
         result.set(row.sha as string, row.size as number);
       }
     }
     return result;
+  }
+
+  getCommitCount(): number {
+    const sql = this.requireSql();
+    const rows = [...sql.exec("SELECT COUNT(*) as cnt FROM commits")];
+    return (rows[0]?.cnt as number) ?? 0;
   }
 
   indexCommit(

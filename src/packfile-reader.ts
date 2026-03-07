@@ -157,6 +157,11 @@ export async function unpackPackfile(
     objectsByOffset.set(entryOffset, packObj);
     cache.set(prepared.sha1Hex, { type: objType, data: objData });
 
+    // Index blob sizes in SQLite so stats() doesn't need R2 reads
+    if (objType === OBJ_BLOB) {
+      engine.indexFileSize(prepared.sha1Hex, objData.length);
+    }
+
     // Streaming flush: write batch to R2 while continuing to parse
     if (pendingWrites.length >= FLUSH_BATCH) {
       await engine.putObjects(pendingWrites.splice(0));

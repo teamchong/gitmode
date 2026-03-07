@@ -736,8 +736,8 @@ export class GitPorcelain {
     files: number;
     size: number;
   }> {
-    // Walk the commit graph to get accurate count
-    const allCommits = await this.log(ref, 10000);
+    // Use SQLite commit index instead of walking R2
+    const commitCount = this.engine.getCommitCount();
     const branches = this.listBranches().length;
     const tags = (await this.listTags()).length;
 
@@ -770,7 +770,7 @@ export class GitPorcelain {
     }
 
     return {
-      commits: allCommits.length,
+      commits: commitCount,
       branches,
       tags,
       files: allFiles.length,
