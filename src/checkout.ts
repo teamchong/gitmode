@@ -32,48 +32,50 @@ export async function materializeWorktree(
   const newTree = await getTreeSha(engine, commitSha, objectCache);
   const prefix = `${repoPath}/worktrees/${branch}/`;
 
-  // Collect new tree files
-  const newFiles = new Map<string, string>(); // filepath -> blobSha
-  await walkTree(engine, newTree, "", newFiles, objectCache);
-
+  // Resolve old tree for incremental diff
+  let oldTree: string | null = null;
   if (oldCommitSha) {
-    // Incremental: diff old tree vs new tree, only write changes
-    let oldTree: string | null = null;
     try {
       oldTree = await getTreeSha(engine, oldCommitSha, objectCache);
     } catch {
       // old commit not readable, fall through to full write
     }
+    // Skip if tree unchanged (empty commit, metadata-only change)
+    if (oldTree === newTree) return;
+  }
 
-    if (oldTree) {
-      const oldFiles = new Map<string, string>();
-      await walkTree(engine, oldTree, "", oldFiles, objectCache);
+  // Collect new tree files
+  const newFiles = new Map<string, string>(); // filepath -> blobSha
+  await walkTree(engine, newTree, "", newFiles, objectCache);
 
-      const writes: Promise<void>[] = [];
-      const deletes: string[] = [];
+  if (oldTree) {
+    const oldFiles = new Map<string, string>();
+    await walkTree(engine, oldTree, "", oldFiles, objectCache);
 
-      // Find added or modified files
-      for (const [path, sha] of newFiles) {
-        const oldSha = oldFiles.get(path);
-        if (oldSha !== sha) {
-          writes.push(writeBlobToWorktree(engine, env, repoPath, branch, path, sha, objectCache));
-        }
+    const writes: Promise<void>[] = [];
+    const deletes: string[] = [];
+
+    // Find added or modified files
+    for (const [path, sha] of newFiles) {
+      const oldSha = oldFiles.get(path);
+      if (oldSha !== sha) {
+        writes.push(writeBlobToWorktree(engine, env, repoPath, branch, path, sha, objectCache));
       }
-
-      // Find deleted files
-      for (const path of oldFiles.keys()) {
-        if (!newFiles.has(path)) {
-          deletes.push(`${prefix}${path}`);
-        }
-      }
-
-      // Execute writes and deletes in parallel
-      if (deletes.length > 0) {
-        writes.push(deleteKeys(env.OBJECTS, deletes));
-      }
-      await Promise.all(writes);
-      return;
     }
+
+    // Find deleted files
+    for (const path of oldFiles.keys()) {
+      if (!newFiles.has(path)) {
+        deletes.push(`${prefix}${path}`);
+      }
+    }
+
+    // Execute writes and deletes in parallel
+    if (deletes.length > 0) {
+      writes.push(deleteKeys(env.OBJECTS, deletes));
+    }
+    await Promise.all(writes);
+    return;
   }
 
   // Full materialization: delete all old files, write all new files
