@@ -26,30 +26,36 @@ export async function buildPackfile(
   const wasm = await engine.getWasmPublic();
   const objects: { packType: number; uncompressedSize: number; compressed: Uint8Array }[] = [];
 
-  // Fetch and compress all objects
-  for (const sha1 of objectShas) {
-    const obj = await engine.readObject(sha1);
-    if (!obj) {
-      console.error(`buildPackfile: missing object ${sha1}, skipping`);
-      continue;
-    }
+  // Fetch objects in parallel batches from R2, then compress sequentially via WASM
+  const FETCH_CONCURRENCY = 50;
+  for (let i = 0; i < objectShas.length; i += FETCH_CONCURRENCY) {
+    const batch = objectShas.slice(i, i + FETCH_CONCURRENCY);
+    const fetched = await Promise.all(
+      batch.map(sha1 => engine.readObject(sha1).then(obj => ({ sha1, obj })))
+    );
+    for (const { sha1, obj } of fetched) {
+      if (!obj) {
+        console.error(`buildPackfile: missing object ${sha1}, skipping`);
+        continue;
+      }
 
-    let compressed: Uint8Array;
-    try {
-      compressed = wasm.zlibDeflate(obj.content);
-    } catch {
-      console.error(`buildPackfile: deflate crashed for ${sha1} (${obj.content.length} bytes)`);
-      continue;
+      let compressed: Uint8Array;
+      try {
+        compressed = wasm.zlibDeflate(obj.content);
+      } catch {
+        console.error(`buildPackfile: deflate crashed for ${sha1} (${obj.content.length} bytes)`);
+        continue;
+      }
+      if (compressed.length === 0) {
+        console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
+        continue;
+      }
+      objects.push({
+        packType: objectToPackType(obj.type),
+        uncompressedSize: obj.content.length,
+        compressed,
+      });
     }
-    if (compressed.length === 0) {
-      console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
-      continue;
-    }
-    objects.push({
-      packType: objectToPackType(obj.type),
-      uncompressedSize: obj.content.length,
-      compressed,
-    });
   }
 
   // Calculate total size
