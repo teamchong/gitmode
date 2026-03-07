@@ -240,8 +240,8 @@ export class GitEngine {
   }
 
   indexFileSize(sha: string, size: number): void {
-    const sql = this.requireSql();
-    sql.exec("INSERT OR IGNORE INTO file_sizes (sha, size) VALUES (?, ?)", sha, size);
+    if (!this.sql) return; // no-op outside DO context (e.g. unit tests)
+    this.sql.exec("INSERT OR IGNORE INTO file_sizes (sha, size) VALUES (?, ?)", sha, size);
   }
 
   getFileSizes(shas: string[]): Map<string, number> {
