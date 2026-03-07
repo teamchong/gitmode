@@ -15,6 +15,7 @@
 import type { GitEngine } from "./git-engine";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
 import { buildPackfile } from "./packfile-builder";
+import { toHex } from "./hex";
 
 const decoder = new TextDecoder();
 
@@ -170,11 +171,8 @@ async function collectObjects(
         pos++; // skip null
         // Read 20-byte SHA-1
         if (pos + 20 <= content.length) {
-          const sha1Bytes = content.slice(pos, pos + 20);
-          const hex = Array.from(sha1Bytes)
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
-          queue.push(hex);
+          const sha1Bytes = content.subarray(pos, pos + 20);
+          queue.push(toHex(sha1Bytes));
           pos += 20;
         } else {
           break;

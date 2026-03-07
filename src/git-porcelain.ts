@@ -4,6 +4,7 @@
 // Covers all common git CLI operations without needing a git binary.
 
 import { GitEngine, OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
+import { toHex } from "./hex";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -69,12 +70,12 @@ function parseTreeEntries(content: Uint8Array): Array<{ mode: string; name: stri
   while (pos < content.length) {
     const spaceIdx = content.indexOf(0x20, pos);
     if (spaceIdx === -1) break;
-    const mode = decoder.decode(content.slice(pos, spaceIdx));
+    const mode = decoder.decode(content.subarray(pos, spaceIdx));
     const nullIdx = content.indexOf(0x00, spaceIdx + 1);
     if (nullIdx === -1) break;
-    const name = decoder.decode(content.slice(spaceIdx + 1, nullIdx));
-    const shaBytes = content.slice(nullIdx + 1, nullIdx + 21);
-    const sha = Array.from(shaBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    const name = decoder.decode(content.subarray(spaceIdx + 1, nullIdx));
+    const shaBytes = content.subarray(nullIdx + 1, nullIdx + 21);
+    const sha = toHex(shaBytes);
     entries.push({ mode, name, sha });
     pos = nullIdx + 21;
   }

@@ -8,6 +8,7 @@
 
 import type { GitEngine } from "./git-engine";
 import { WasmEngine } from "./wasm-engine";
+import { toHex } from "./hex";
 
 // Packfile object types (git pack format)
 const PACK_OBJ_COMMIT = 1;
@@ -65,7 +66,7 @@ export async function unpackPackfile(
 
   // Verify header
   if (packData.length < 12) throw new Error("Packfile too short");
-  const sig = new TextDecoder().decode(packData.slice(0, 4));
+  const sig = new TextDecoder().decode(packData.subarray(0, 4));
   if (sig !== "PACK") throw new Error("Invalid packfile signature");
 
   const version = readUint32BE(packData, 4);
@@ -87,7 +88,7 @@ export async function unpackPackfile(
     let baseDeltaOffset: number | undefined;
 
     if (type === PACK_OBJ_REF_DELTA) {
-      baseRef = packData.slice(offset, offset + 20);
+      baseRef = packData.subarray(offset, offset + 20);
       offset += 20;
     } else if (type === PACK_OBJ_OFS_DELTA) {
       const { negOffset, bytesRead } = parseOfsOffset(packData, offset);
@@ -122,9 +123,7 @@ export async function unpackPackfile(
     if (type === PACK_OBJ_REF_DELTA && baseRef) {
       const targetSize = parseDeltaTargetSize(decompressed);
       const maxOutput = Math.max(targetSize + 64, 65536);
-      const baseHex = Array.from(baseRef)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
+      const baseHex = toHex(baseRef);
       const baseObj = objects.find((o) => o.sha1Hex === baseHex);
       if (!baseObj) {
         // Base might already be in storage — need R2 read for this one
@@ -156,6 +155,9 @@ export async function unpackPackfile(
       objects.push({ type: objType, data: decompressed, sha1Hex: prepared.sha1Hex, offset: entryOffset });
     }
   }
+
+  // Log peak WASM heap usage for diagnostics
+  console.log(`unpackPackfile: ${numObjects} objects, peak WASM heap ${(wasm.getHeapUsed() / 1024).toFixed(0)}KB`);
 
   // Phase 2: Batch write all objects to R2 in parallel
   await engine.putObjects(pendingWrites);

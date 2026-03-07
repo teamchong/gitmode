@@ -4,6 +4,7 @@
 // alongside the gitmode-specific env imports.
 
 import wasmModule from "./wasm-module";
+import { toHex } from "./hex";
 
 export interface WasmExports {
   memory: WebAssembly.Memory;
@@ -309,6 +310,11 @@ export class WasmEngine {
     return new WasmEngine(instance.exports as unknown as WasmExports);
   }
 
+  /** Return current WASM heap usage in bytes. */
+  getHeapUsed(): number {
+    return this.exports.getHeapUsed();
+  }
+
   // --- Memory helpers ---
 
   writeBytes(data: Uint8Array): number {
@@ -345,10 +351,7 @@ export class WasmEngine {
   }
 
   sha1Hex(data: Uint8Array): string {
-    const digest = this.sha1(data);
-    return Array.from(digest)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return toHex(this.sha1(data));
   }
 
   hashObject(type: number, content: Uint8Array): Uint8Array {

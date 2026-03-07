@@ -12,6 +12,7 @@
 import { GitEngine, OBJ_TREE, OBJ_BLOB, OBJ_COMMIT } from "./git-engine";
 import type { Env } from "./env";
 import type { ObjectCache } from "./packfile-reader";
+import { toHex } from "./hex";
 
 /**
  * Materialize the tree at `commitSha` into R2 worktree files for `branch`.
@@ -129,12 +130,10 @@ async function walkTree(
     const nullIdx = data.indexOf(0x00, spaceIdx + 1);
     if (nullIdx === -1) break;
 
-    const mode = new TextDecoder().decode(data.slice(offset, spaceIdx));
-    const name = new TextDecoder().decode(data.slice(spaceIdx + 1, nullIdx));
-    const shaBytes = data.slice(nullIdx + 1, nullIdx + 21);
-    const sha = Array.from(shaBytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const mode = new TextDecoder().decode(data.subarray(offset, spaceIdx));
+    const name = new TextDecoder().decode(data.subarray(spaceIdx + 1, nullIdx));
+    const shaBytes = data.subarray(nullIdx + 1, nullIdx + 21);
+    const sha = toHex(shaBytes);
 
     offset = nullIdx + 21;
     const fullPath = pathPrefix ? `${pathPrefix}/${name}` : name;

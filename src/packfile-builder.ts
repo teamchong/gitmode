@@ -5,7 +5,6 @@
 
 import type { GitEngine } from "./git-engine";
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
-import { WasmEngine } from "./wasm-engine";
 
 const PACK_SIGNATURE = new Uint8Array([0x50, 0x41, 0x43, 0x4b]); // "PACK"
 
@@ -24,7 +23,7 @@ export async function buildPackfile(
   engine: GitEngine,
   objectShas: string[]
 ): Promise<Uint8Array> {
-  const wasm = await WasmEngine.create();
+  const wasm = await engine.getWasmPublic();
   const objects: { packType: number; uncompressedSize: number; compressed: Uint8Array }[] = [];
 
   // Fetch and compress all objects

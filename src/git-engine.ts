@@ -6,6 +6,7 @@
 //   SQLite:  refs, head, repo_meta, commits, permissions (per-repo DO)
 
 import { WasmEngine } from "./wasm-engine";
+import { toHex } from "./hex";
 
 // Object types matching Zig enum
 export const OBJ_BLOB = 1;
@@ -76,9 +77,7 @@ export class GitEngine {
     content: Uint8Array,
   ): { sha1Hex: string; compressed: Uint8Array } {
     const digest = wasm.hashObject(type, content);
-    const sha1Hex = Array.from(digest)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const sha1Hex = toHex(digest);
     const header = new TextEncoder().encode(
       `${typeToName(type)} ${content.length}\0`
     );
@@ -134,7 +133,7 @@ export class GitEngine {
     const nullIdx = raw.indexOf(0x00); // null
     if (spaceIdx === -1 || nullIdx === -1) return null;
 
-    const typeStr = new TextDecoder().decode(raw.slice(0, spaceIdx));
+    const typeStr = new TextDecoder().decode(raw.subarray(0, spaceIdx));
     const type = nameToType(typeStr);
     const content = raw.slice(nullIdx + 1);
 
