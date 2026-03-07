@@ -1,13 +1,12 @@
 // Unpack a received packfile — extract objects and store in R2
 //
-// Reads packfile v2 format, decompresses each object with Zig WASM,
+// Reads packfile v2 format, decompresses each object with Zig WASM/libdeflate,
 // resolves deltas, and stores loose objects.
 //
-// Optimization: prepares all objects (hash + compress) first, then
-// flushes to R2 in batched parallel writes instead of one-at-a-time.
+// Streaming: flushes compressed objects to R2 in batches during parsing
+// instead of buffering all writes until the end, reducing peak memory.
 
 import type { GitEngine } from "./git-engine";
-import { WasmEngine } from "./wasm-engine";
 import { toHex } from "./hex";
 
 // Packfile object types (git pack format)
@@ -74,9 +73,14 @@ export async function unpackPackfile(
 
   const numObjects = readUint32BE(packData, 8);
 
-  // Phase 1: Parse all objects (CPU-only, no R2)
-  const objects: PackObject[] = [];
+  // Object lookup tables for delta resolution (O(1) instead of O(n) find)
+  const objectsByHash = new Map<string, PackObject>();
+  const objectsByOffset = new Map<number, PackObject>();
+
+  // Streaming write buffer — flush to R2 every FLUSH_BATCH objects
+  const FLUSH_BATCH = 200;
   const pendingWrites: Array<{ sha1Hex: string; compressed: Uint8Array }> = [];
+  const cache: ObjectCache = new Map();
   let offset = 12;
 
   for (let i = 0; i < numObjects; i++) {
@@ -97,13 +101,8 @@ export async function unpackPackfile(
     }
 
     // Decompress zlib data — pass a bounded slice to avoid copying the entire
-    // remaining packfile into the WASM arena. Cap input at decompressed
-    // size + overhead (compressed is always smaller for real data, but zlib
-    // stored blocks can be slightly larger, so add generous margin).
+    // remaining packfile into the WASM arena.
     const maxDecompressed = Math.max(size * 4, 65536);
-    // Pass enough compressed input — for stored blocks (level 0), compressed can
-    // be slightly larger than decompressed due to block headers. Use remaining
-    // packfile but cap at WASM arena limit to prevent OOM.
     const inputCap = Math.min(packData.length - offset, 30 * 1024 * 1024);
     const compressedSlice = packData.subarray(offset, offset + inputCap);
     let decompressed: Uint8Array;
@@ -113,60 +112,65 @@ export async function unpackPackfile(
       decompressed = result.data;
       consumed = result.consumed;
     } catch {
-      // Zig flate can fail on certain deflate streams — fallback to node:zlib
+      // libdeflate can fail on rare edge cases — fallback to node:zlib
       const result = await jsInflateTracked(packData, offset, size);
       decompressed = result.data;
       consumed = result.consumed;
     }
     offset += consumed;
 
+    let objType: number;
+    let objData: Uint8Array;
+
     if (type === PACK_OBJ_REF_DELTA && baseRef) {
       const targetSize = parseDeltaTargetSize(decompressed);
       const maxOutput = Math.max(targetSize + 64, 65536);
       const baseHex = toHex(baseRef);
-      const baseObj = objects.find((o) => o.sha1Hex === baseHex);
+      const baseObj = objectsByHash.get(baseHex);
       if (!baseObj) {
         // Base might already be in storage — need R2 read for this one
         const stored = await engine.readObject(baseHex);
         if (!stored) throw new Error(`Missing delta base: ${baseHex}`);
-        const resolved = wasm.deltaApply(stored.content, decompressed, maxOutput);
-        const prepared = engine.prepareObject(wasm, stored.type, resolved);
-        pendingWrites.push(prepared);
-        objects.push({ type: stored.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
+        objData = wasm.deltaApply(stored.content, decompressed, maxOutput);
+        objType = stored.type;
       } else {
-        const resolved = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
-        const prepared = engine.prepareObject(wasm, baseObj.type, resolved);
-        pendingWrites.push(prepared);
-        objects.push({ type: baseObj.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
+        objData = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
+        objType = baseObj.type;
       }
     } else if (type === PACK_OBJ_OFS_DELTA && baseDeltaOffset !== undefined) {
       const targetSize = parseDeltaTargetSize(decompressed);
       const maxOutput = Math.max(targetSize + 64, 65536);
-      const baseObj = objects.find((o) => o.offset === baseDeltaOffset);
+      const baseObj = objectsByOffset.get(baseDeltaOffset);
       if (!baseObj) throw new Error(`Missing ofs-delta base at offset ${baseDeltaOffset}`);
-      const resolved = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
-      const prepared = engine.prepareObject(wasm, baseObj.type, resolved);
-      pendingWrites.push(prepared);
-      objects.push({ type: baseObj.type, data: resolved, sha1Hex: prepared.sha1Hex, offset: entryOffset });
+      objData = wasm.deltaApply(baseObj.data, decompressed, maxOutput);
+      objType = baseObj.type;
     } else {
-      const objType = packTypeToObjectType(type);
-      const prepared = engine.prepareObject(wasm, objType, decompressed);
-      pendingWrites.push(prepared);
-      objects.push({ type: objType, data: decompressed, sha1Hex: prepared.sha1Hex, offset: entryOffset });
+      objType = packTypeToObjectType(type);
+      objData = decompressed;
+    }
+
+    const prepared = engine.prepareObject(wasm, objType, objData);
+    pendingWrites.push(prepared);
+
+    const packObj: PackObject = { type: objType, data: objData, sha1Hex: prepared.sha1Hex, offset: entryOffset };
+    objectsByHash.set(prepared.sha1Hex, packObj);
+    objectsByOffset.set(entryOffset, packObj);
+    cache.set(prepared.sha1Hex, { type: objType, data: objData });
+
+    // Streaming flush: write batch to R2 while continuing to parse
+    if (pendingWrites.length >= FLUSH_BATCH) {
+      await engine.putObjects(pendingWrites.splice(0));
     }
   }
 
   // Log peak WASM heap usage for diagnostics
   console.log(`unpackPackfile: ${numObjects} objects, peak WASM heap ${(wasm.getHeapUsed() / 1024).toFixed(0)}KB`);
 
-  // Phase 2: Batch write all objects to R2 in parallel
-  await engine.putObjects(pendingWrites);
-
-  // Return in-memory cache for optimistic worktree writes
-  const cache: ObjectCache = new Map();
-  for (const obj of objects) {
-    cache.set(obj.sha1Hex, { type: obj.type, data: obj.data });
+  // Flush remaining objects
+  if (pendingWrites.length > 0) {
+    await engine.putObjects(pendingWrites);
   }
+
   return cache;
 }
 
