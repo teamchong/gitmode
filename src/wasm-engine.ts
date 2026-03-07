@@ -187,8 +187,7 @@ function createWasiShims() {
       for (let i = 0; i < iovsLen; i++) {
         const ptr = memory.getUint32(iovsPtr + i * 8, true);
         const len = memory.getUint32(iovsPtr + i * 8 + 4, true);
-        const bytes = memU8.slice(ptr, ptr + len);
-        const text = textDecoder.decode(bytes);
+        const text = textDecoder.decode(memU8.subarray(ptr, ptr + len));
         if (fd === 1 || fd === 2) {
           console.log("[wasm]", text);
         }
