@@ -9,6 +9,8 @@
 import type { GitEngine } from "./git-engine";
 import { toHex } from "./hex";
 
+const decoder = new TextDecoder();
+
 // Packfile object types (git pack format)
 const PACK_OBJ_COMMIT = 1;
 const PACK_OBJ_TREE = 2;
@@ -65,7 +67,7 @@ export async function unpackPackfile(
 
   // Verify header
   if (packData.length < 12) throw new Error("Packfile too short");
-  const sig = new TextDecoder().decode(packData.subarray(0, 4));
+  const sig = decoder.decode(packData.subarray(0, 4));
   if (sig !== "PACK") throw new Error("Invalid packfile signature");
 
   const version = readUint32BE(packData, 4);

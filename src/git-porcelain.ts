@@ -403,24 +403,37 @@ export class GitPorcelain {
   /** List all tags. */
   async listTags(): Promise<TagInfo[]> {
     const refs = this.engine.listRefs();
-    const tags: TagInfo[] = [];
+    const tagRefs: Array<{ name: string; sha: string }> = [];
     for (const [name, sha] of refs) {
-      if (!name.startsWith("tags/")) continue;
-      const tagName = name.slice(5);
-      const obj = await this.engine.readObject(sha);
-      if (obj && obj.type === OBJ_TAG) {
-        const text = decoder.decode(obj.content);
-        const targetMatch = text.match(/^object ([0-9a-f]{40})/m);
-        const taggerMatch = text.match(/^tagger (.+?) <.+?>/m);
-        const msgStart = text.indexOf("\n\n");
-        tags.push({
-          name: tagName, sha, type: "annotated",
-          target: targetMatch?.[1],
-          tagger: taggerMatch?.[1],
-          message: msgStart >= 0 ? text.slice(msgStart + 2) : undefined,
-        });
-      } else {
-        tags.push({ name: tagName, sha, type: "lightweight" });
+      if (name.startsWith("tags/")) {
+        tagRefs.push({ name: name.slice(5), sha });
+      }
+    }
+    if (tagRefs.length === 0) return [];
+
+    // Batch-fetch tag objects in parallel
+    const CONCURRENCY = 50;
+    const tags: TagInfo[] = [];
+    for (let i = 0; i < tagRefs.length; i += CONCURRENCY) {
+      const batch = tagRefs.slice(i, i + CONCURRENCY);
+      const fetched = await Promise.all(
+        batch.map(t => this.engine.readObject(t.sha).then(obj => ({ ...t, obj })))
+      );
+      for (const { name, sha, obj } of fetched) {
+        if (obj && obj.type === OBJ_TAG) {
+          const text = decoder.decode(obj.content);
+          const targetMatch = text.match(/^object ([0-9a-f]{40})/m);
+          const taggerMatch = text.match(/^tagger (.+?) <.+?>/m);
+          const msgStart = text.indexOf("\n\n");
+          tags.push({
+            name, sha, type: "annotated",
+            target: targetMatch?.[1],
+            tagger: taggerMatch?.[1],
+            message: msgStart >= 0 ? text.slice(msgStart + 2) : undefined,
+          });
+        } else {
+          tags.push({ name, sha, type: "lightweight" });
+        }
       }
     }
     return tags.sort((a, b) => a.name.localeCompare(b.name));

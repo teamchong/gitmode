@@ -6,6 +6,9 @@
 import wasmModule from "./wasm-module";
 import { toHex } from "./hex";
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 export interface WasmExports {
   memory: WebAssembly.Memory;
 
@@ -185,7 +188,7 @@ function createWasiShims() {
         const ptr = memory.getUint32(iovsPtr + i * 8, true);
         const len = memory.getUint32(iovsPtr + i * 8 + 4, true);
         const bytes = memU8.slice(ptr, ptr + len);
-        const text = new TextDecoder().decode(bytes);
+        const text = textDecoder.decode(bytes);
         if (fd === 1 || fd === 2) {
           console.log("[wasm]", text);
         }
@@ -325,7 +328,7 @@ export class WasmEngine {
   }
 
   writeString(s: string): { ptr: number; len: number } {
-    const encoded = new TextEncoder().encode(s);
+    const encoded = textEncoder.encode(s);
     const ptr = this.writeBytes(encoded);
     return { ptr, len: encoded.length };
   }
@@ -335,7 +338,7 @@ export class WasmEngine {
   }
 
   readString(ptr: number, len: number): string {
-    return new TextDecoder().decode(
+    return textDecoder.decode(
       new Uint8Array(this.exports.memory.buffer, ptr, len)
     );
   }

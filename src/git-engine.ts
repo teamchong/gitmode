@@ -14,6 +14,9 @@ export const OBJ_TREE = 2;
 export const OBJ_COMMIT = 3;
 export const OBJ_TAG = 4;
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
 export class GitEngine {
   private objects: R2Bucket;
   private repo: string;
@@ -78,7 +81,7 @@ export class GitEngine {
   ): { sha1Hex: string; compressed: Uint8Array } {
     const digest = wasm.hashObject(type, content);
     const sha1Hex = toHex(digest);
-    const header = new TextEncoder().encode(
+    const header = encoder.encode(
       `${typeToName(type)} ${content.length}\0`
     );
     const full = new Uint8Array(header.length + content.length);
@@ -156,7 +159,7 @@ export class GitEngine {
     const nullIdx = raw.indexOf(0x00); // null
     if (spaceIdx === -1 || nullIdx === -1) return null;
 
-    const typeStr = new TextDecoder().decode(raw.subarray(0, spaceIdx));
+    const typeStr = decoder.decode(raw.subarray(0, spaceIdx));
     const type = nameToType(typeStr);
     const content = raw.subarray(nullIdx + 1);
 

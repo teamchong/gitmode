@@ -14,6 +14,8 @@ import type { Env } from "./env";
 import type { ObjectCache } from "./packfile-reader";
 import { toHex } from "./hex";
 
+const decoder = new TextDecoder();
+
 /**
  * Materialize the tree at `commitSha` into R2 worktree files for `branch`.
  * If `oldCommitSha` is provided, only writes changed/added files and deletes removed ones.
@@ -105,7 +107,7 @@ async function getTreeSha(engine: GitEngine, commitSha: string, cache?: ObjectCa
   if (!commit || commit.type !== OBJ_COMMIT) {
     throw new Error(`Cannot read commit ${commitSha}`);
   }
-  const text = new TextDecoder().decode(commit.content);
+  const text = decoder.decode(commit.content);
   const m = text.match(/^tree ([0-9a-f]{40})/m);
   if (!m) throw new Error(`No tree in commit ${commitSha}`);
   return m[1];
@@ -135,8 +137,8 @@ async function walkTree(
     const nullIdx = data.indexOf(0x00, spaceIdx + 1);
     if (nullIdx === -1) break;
 
-    const mode = new TextDecoder().decode(data.subarray(offset, spaceIdx));
-    const name = new TextDecoder().decode(data.subarray(spaceIdx + 1, nullIdx));
+    const mode = decoder.decode(data.subarray(offset, spaceIdx));
+    const name = decoder.decode(data.subarray(spaceIdx + 1, nullIdx));
     const shaBytes = data.subarray(nullIdx + 1, nullIdx + 21);
     const sha = toHex(shaBytes);
 
@@ -175,10 +177,9 @@ async function writeBlobToWorktree(
  * Delete specific R2 keys.
  */
 async function deleteKeys(bucket: R2Bucket, keys: string[]): Promise<void> {
-  // R2 delete supports batches
+  // R2 delete() accepts an array of up to 1000 keys
   for (let i = 0; i < keys.length; i += 1000) {
-    const batch = keys.slice(i, i + 1000);
-    await Promise.all(batch.map((key) => bucket.delete(key)));
+    await bucket.delete(keys.slice(i, i + 1000));
   }
 }
 

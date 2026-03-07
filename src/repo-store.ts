@@ -15,6 +15,8 @@ import { handleReceivePack } from "./receive-pack";
 import { handleInfoRefs } from "./info-refs";
 import { GitPorcelain } from "./git-porcelain";
 
+const decoder = new TextDecoder();
+
 export class RepoStore extends DurableObject<Env> {
   private sql: SqlStorage;
 
@@ -205,7 +207,7 @@ async function handleApiAction(
       const content = await porcelain.catFile(ref, path);
       if (!content) return Response.json({ error: "not found" }, { status: 404 });
       // Return as base64 for binary safety
-      const text = new TextDecoder().decode(content);
+      const text = decoder.decode(content);
       return Response.json({ content: text, size: content.length });
     }
 
@@ -452,7 +454,7 @@ async function handleApiAction(
       return Response.json({
         type: typeNames[obj.type] ?? "unknown",
         size: obj.content.length,
-        content: new TextDecoder().decode(obj.content),
+        content: decoder.decode(obj.content),
       });
     }
 

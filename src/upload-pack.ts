@@ -160,7 +160,7 @@ async function collectObjects(
 
         if (type === 3) {
           // Commit — parse tree and parent refs
-          const text = new TextDecoder().decode(content);
+          const text = decoder.decode(content);
           const lines = text.split("\n");
           for (const line of lines) {
             if (line.startsWith("tree ")) {
@@ -188,7 +188,7 @@ async function collectObjects(
           }
         } else if (type === 4) {
           // Tag — parse object ref
-          const text = new TextDecoder().decode(content);
+          const text = decoder.decode(content);
           const objLine = text.split("\n").find((l) => l.startsWith("object "));
           if (objLine) nextFrontier.push(objLine.slice(7, 47));
         }
