@@ -69,7 +69,7 @@ export async function handleReceivePack(
   }
 
   // Remaining bytes are the packfile
-  const packData = body.slice(offset);
+  const packData = body.subarray(offset);
 
   // Unpack objects from packfile into R2, keep in-memory cache for worktree
   let objectCache: ObjectCache | undefined;

@@ -76,11 +76,16 @@ export async function materializeWorktree(
 
   // Full materialization: delete all old files, write all new files
   await deleteByPrefix(env.OBJECTS, prefix);
-  const writes: Promise<void>[] = [];
-  for (const [filepath, blobSha] of newFiles) {
-    writes.push(writeBlobToWorktree(engine, env, repoPath, branch, filepath, blobSha, objectCache));
+  const entries = [...newFiles.entries()];
+  const WRITE_CONCURRENCY = 50;
+  for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
+    const batch = entries.slice(i, i + WRITE_CONCURRENCY);
+    await Promise.all(
+      batch.map(([filepath, blobSha]) =>
+        writeBlobToWorktree(engine, env, repoPath, branch, filepath, blobSha, objectCache)
+      )
+    );
   }
-  await Promise.all(writes);
 }
 
 async function readObjectCached(
