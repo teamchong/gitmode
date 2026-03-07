@@ -39,6 +39,35 @@ pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build WASM module for Cloudflare Workers");
     wasm_step.dependOn(&install_wasm.step);
 
+    // === Core-only WASM (no libgit2, no host imports) ===
+    const core = b.addExecutable(.{
+        .name = "gitmode-core",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main_core.zig"),
+            .target = wasm_target,
+            .optimize = if (optimize == .Debug) .Debug else .ReleaseSmall,
+            .strip = optimize != .Debug,
+            .unwind_tables = .none,
+            .link_libc = true,
+        }),
+    });
+
+    core.entry = .disabled;
+    core.rdynamic = true;
+    core.stack_size = 1 * 1024 * 1024;
+
+    addLibdeflate(b, core.root_module);
+
+    const install_core = b.addInstallArtifact(core, .{});
+
+    const core_step = b.step("core", "Build core-only WASM (client, no libgit2)");
+    core_step.dependOn(&install_core.step);
+
+    // Build both with: zig build wasm core
+    const all_step = b.step("all", "Build both server and core WASM modules");
+    all_step.dependOn(&install_wasm.step);
+    all_step.dependOn(&install_core.step);
+
     // === Native target for testing ===
     const native_target = b.standardTargetOptions(.{});
 
