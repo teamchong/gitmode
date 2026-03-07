@@ -366,6 +366,7 @@ export class WasmEngine {
     this.exports.resetHeap();
     const inPtr = this.writeBytes(compressed);
     const outPtr = this.exports.alloc(maxSize);
+    if (outPtr === 0) return new Uint8Array(0); // arena full
     const written = this.exports.zlib_inflate(
       inPtr,
       compressed.length,
@@ -394,8 +395,9 @@ export class WasmEngine {
   zlibDeflate(data: Uint8Array): Uint8Array {
     this.exports.resetHeap();
     const inPtr = this.writeBytes(data);
-    // Worst case: stored blocks add 5 bytes per 16KB + zlib header/checksum
-    const outCap = data.length + Math.ceil(data.length / 16383) * 5 + 64;
+    // libdeflate level 0 uses 5000-byte blocks with 5 bytes overhead each + 6 bytes zlib framing
+    const maxBlocks = Math.max(Math.ceil(data.length / 5000), 1);
+    const outCap = data.length + maxBlocks * 5 + 6 + 64;
     const outPtr = this.exports.alloc(outCap);
     const written = this.exports.zlib_deflate(
       inPtr,

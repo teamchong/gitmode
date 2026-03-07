@@ -3,6 +3,9 @@
 // Replaces Zig's std.compress.flate which crashes on ~0.01% of deflate streams.
 // libdeflate is battle-tested (used by termweb/metal0) and 2-3x faster.
 //
+// Decompressor and compressor are allocated once at init time and reused
+// across all calls, avoiding per-call malloc/free overhead in WASM.
+//
 // Deflate uses compression level 0 (stored blocks) — fastest possible.
 // For a serverless git host, network bandwidth is cheap (Cloudflare egress is free)
 // and CPU time is expensive (billed per ms), so level 0 is optimal.
@@ -12,10 +15,25 @@ const c = @cImport({
     @cInclude("libdeflate.h");
 });
 
+// Persistent decompressor/compressor — allocated once, reused across calls
+var global_decompressor: ?*c.libdeflate_decompressor = null;
+var global_compressor: ?*c.libdeflate_compressor = null;
+
+fn getDecompressor() !*c.libdeflate_decompressor {
+    if (global_decompressor) |d| return d;
+    global_decompressor = c.libdeflate_alloc_decompressor() orelse return error.OutOfMemory;
+    return global_decompressor.?;
+}
+
+fn getCompressor() !*c.libdeflate_compressor {
+    if (global_compressor) |comp| return comp;
+    global_compressor = c.libdeflate_alloc_compressor(0) orelse return error.OutOfMemory;
+    return global_compressor.?;
+}
+
 /// Decompress zlib data. Returns number of bytes written to out.
 pub fn inflate(input: []const u8, out: []u8) !usize {
-    const decompressor = c.libdeflate_alloc_decompressor() orelse return error.OutOfMemory;
-    defer c.libdeflate_free_decompressor(decompressor);
+    const decompressor = try getDecompressor();
 
     var actual_out: usize = 0;
     const result = c.libdeflate_zlib_decompress(
@@ -42,8 +60,7 @@ pub const InflateResult = struct {
 /// Decompress zlib data, returning both output size and input bytes consumed.
 /// This is used by the packfile reader to know where the next entry starts.
 pub fn inflateWithConsumed(input: []const u8, out: []u8) !InflateResult {
-    const decompressor = c.libdeflate_alloc_decompressor() orelse return error.OutOfMemory;
-    defer c.libdeflate_free_decompressor(decompressor);
+    const decompressor = try getDecompressor();
 
     var actual_in: usize = 0;
     var actual_out: usize = 0;
@@ -69,8 +86,7 @@ pub fn inflateWithConsumed(input: []const u8, out: []u8) !InflateResult {
 /// Compress data with zlib using deflate stored blocks (compression level 0).
 /// Produces valid RFC 1950 (zlib) wrapping RFC 1951 (deflate) stored blocks.
 pub fn deflate(input: []const u8, out: []u8) !usize {
-    const compressor = c.libdeflate_alloc_compressor(0) orelse return error.OutOfMemory;
-    defer c.libdeflate_free_compressor(compressor);
+    const compressor = try getCompressor();
 
     const bound = c.libdeflate_zlib_compress_bound(compressor, input.len);
     if (bound > out.len) {

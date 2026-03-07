@@ -114,19 +114,42 @@ export class GitEngine {
     // Decompress with retry — compression ratios can exceed 100x for repetitive data.
     // Try increasing buffer sizes until decompression succeeds.
     // Cap at 32MB to stay within WASM arena (64MB total minus input).
+    // Decompress: try WASM (libdeflate), fallback to node:zlib
     let raw: Uint8Array | null = null;
-    for (const multiplier of [4, 16, 64, 256]) {
-      const maxSize = Math.min(
-        Math.max(compressed.length * multiplier, 65536),
-        32 * 1024 * 1024
-      );
-      const result = wasm.zlibInflate(compressed, maxSize);
-      if (result.length > 0) {
-        raw = result;
-        break;
+    try {
+      // libdeflate needs exact or larger output buffer — try increasing sizes
+      for (const multiplier of [4, 16, 64, 256]) {
+        const maxSize = Math.min(
+          Math.max(compressed.length * multiplier, 65536),
+          32 * 1024 * 1024
+        );
+        const result = wasm.zlibInflate(compressed, maxSize);
+        if (result.length > 0) {
+          raw = result;
+          break;
+        }
       }
+    } catch {
+      // WASM trap — fall through to node:zlib
     }
-    if (!raw || raw.length === 0) return null;
+    if (!raw || raw.length === 0) {
+      // WASM decompression failed — fallback to node:zlib
+      const { createInflate } = await import("node:zlib");
+      raw = await new Promise<Uint8Array>((resolve, reject) => {
+        const inflate = createInflate();
+        const chunks: Buffer[] = [];
+        inflate.on("data", (chunk: Buffer) => chunks.push(chunk));
+        inflate.on("end", () => {
+          const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+          const data = new Uint8Array(totalLen);
+          let pos = 0;
+          for (const c of chunks) { data.set(c, pos); pos += c.length; }
+          resolve(data);
+        });
+        inflate.on("error", reject);
+        inflate.end(Buffer.from(compressed));
+      });
+    }
 
     // Parse header to extract type and content
     const spaceIdx = raw.indexOf(0x20); // space

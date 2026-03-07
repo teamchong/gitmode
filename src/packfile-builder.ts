@@ -34,7 +34,13 @@ export async function buildPackfile(
       continue;
     }
 
-    const compressed = wasm.zlibDeflate(obj.content);
+    let compressed: Uint8Array;
+    try {
+      compressed = wasm.zlibDeflate(obj.content);
+    } catch {
+      console.error(`buildPackfile: deflate crashed for ${sha1} (${obj.content.length} bytes)`);
+      continue;
+    }
     if (compressed.length === 0) {
       console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
       continue;
