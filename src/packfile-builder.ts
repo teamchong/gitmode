@@ -30,9 +30,16 @@ export async function buildPackfile(
   // Fetch and compress all objects
   for (const sha1 of objectShas) {
     const obj = await engine.readObject(sha1);
-    if (!obj) continue;
+    if (!obj) {
+      console.error(`buildPackfile: missing object ${sha1}, skipping`);
+      continue;
+    }
 
     const compressed = wasm.zlibDeflate(obj.content);
+    if (compressed.length === 0) {
+      console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
+      continue;
+    }
     objects.push({
       packType: objectToPackType(obj.type),
       uncompressedSize: obj.content.length,

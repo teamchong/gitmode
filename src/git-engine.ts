@@ -111,9 +111,23 @@ export class GitEngine {
     if (!compressed) return null;
 
     const wasm = await this.getWasm();
-    // Decompress — estimate 4x expansion
-    const maxSize = Math.max(compressed.length * 4, 65536);
-    const raw = wasm.zlibInflate(compressed, maxSize);
+
+    // Decompress with retry — compression ratios can exceed 100x for repetitive data.
+    // Try increasing buffer sizes until decompression succeeds.
+    // Cap at 32MB to stay within WASM arena (64MB total minus input).
+    let raw: Uint8Array | null = null;
+    for (const multiplier of [4, 16, 64, 256]) {
+      const maxSize = Math.min(
+        Math.max(compressed.length * multiplier, 65536),
+        32 * 1024 * 1024
+      );
+      const result = wasm.zlibInflate(compressed, maxSize);
+      if (result.length > 0) {
+        raw = result;
+        break;
+      }
+    }
+    if (!raw || raw.length === 0) return null;
 
     // Parse header to extract type and content
     const spaceIdx = raw.indexOf(0x20); // space

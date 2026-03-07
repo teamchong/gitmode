@@ -391,8 +391,8 @@ export class WasmEngine {
   zlibDeflate(data: Uint8Array): Uint8Array {
     this.exports.resetHeap();
     const inPtr = this.writeBytes(data);
-    // Worst case: deflate output slightly larger than input
-    const outCap = data.length + 64;
+    // Worst case: stored blocks add 5 bytes per 16KB + zlib header/checksum
+    const outCap = data.length + Math.ceil(data.length / 16383) * 5 + 64;
     const outPtr = this.exports.alloc(outCap);
     const written = this.exports.zlib_deflate(
       inPtr,
