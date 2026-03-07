@@ -9,21 +9,29 @@ const decoder = new TextDecoder();
 export const FLUSH_PKT = encoder.encode("0000");
 export const DELIM_PKT = encoder.encode("0001");
 
+function writeHexLen(buf: Uint8Array, len: number): void {
+  buf[0] = len >> 12 & 0xf;
+  buf[1] = len >> 8 & 0xf;
+  buf[2] = len >> 4 & 0xf;
+  buf[3] = len & 0xf;
+  for (let i = 0; i < 4; i++) {
+    buf[i] = buf[i] < 10 ? buf[i] + 0x30 : buf[i] - 10 + 0x61;
+  }
+}
+
 export function encodePktLine(data: string): Uint8Array {
   const payload = encoder.encode(data);
   const totalLen = payload.length + 4;
-  const hex = totalLen.toString(16).padStart(4, "0");
   const result = new Uint8Array(totalLen);
-  result.set(encoder.encode(hex));
+  writeHexLen(result, totalLen);
   result.set(payload, 4);
   return result;
 }
 
 export function encodePktLineBytes(data: Uint8Array): Uint8Array {
   const totalLen = data.length + 4;
-  const hex = totalLen.toString(16).padStart(4, "0");
   const result = new Uint8Array(totalLen);
-  result.set(encoder.encode(hex));
+  writeHexLen(result, totalLen);
   result.set(data, 4);
   return result;
 }
@@ -40,7 +48,7 @@ export function decodePktLine(
 ): PktLineResult | null {
   if (offset + 4 > data.length) return null;
 
-  const lenHex = decoder.decode(data.slice(offset, offset + 4));
+  const lenHex = decoder.decode(data.subarray(offset, offset + 4));
 
   if (lenHex === "0000") {
     return { type: "flush", nextOffset: offset + 4 };
@@ -56,7 +64,7 @@ export function decodePktLine(
   if (isNaN(totalLen) || totalLen < 4) return null;
   if (offset + totalLen > data.length) return null;
 
-  const payload = data.slice(offset + 4, offset + totalLen);
+  const payload = data.subarray(offset + 4, offset + totalLen);
   return { type: "data", payload, nextOffset: offset + totalLen };
 }
 

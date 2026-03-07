@@ -158,7 +158,7 @@ export class GitEngine {
 
     const typeStr = new TextDecoder().decode(raw.subarray(0, spaceIdx));
     const type = nameToType(typeStr);
-    const content = raw.slice(nullIdx + 1);
+    const content = raw.subarray(nullIdx + 1);
 
     return { type, content };
   }
