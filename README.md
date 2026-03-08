@@ -168,7 +168,9 @@ gitmode/
 │       ├── zlib.zig         Inflate/deflate via libdeflate
 │       ├── protocol.zig     pkt-line framing
 │       ├── simd.zig         SIMD128 memory ops
-│       └── libgit2.zig      libgit2 bindings (diff, blame, revwalk)
+│       ├── libgit2.zig      libgit2 bindings (diff, blame, revwalk)
+│       ├── checkout.zig     Worktree materialization (WASM export)
+│       └── r2_backend.zig   R2 storage backend for libgit2
 │   └── vendor/libdeflate/   Vendored libdeflate 1.25
 ├── wasm/libgit2-wasm/       libgit2 compiled to WASM
 ├── deps/libgit2/            libgit2 source (submodule)

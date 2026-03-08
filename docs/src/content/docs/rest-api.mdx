@@ -260,6 +260,18 @@ POST /api/repos/:owner/:repo/checkout
 { "branch": "feature" }
 ```
 
+### Detach HEAD
+
+```http
+POST /api/repos/:owner/:repo/detach-head
+```
+
+```json
+{ "sha": "abc123..." }
+```
+
+Sets HEAD to a specific commit SHA (detached HEAD state).
+
 ## Tags
 
 ### List Tags
