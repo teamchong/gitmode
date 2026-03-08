@@ -24,16 +24,29 @@ export async function buildPackfile(
   objectShas: string[]
 ): Promise<Uint8Array> {
   const wasm = await engine.getWasmPublic();
-  const objects: { packType: number; uncompressedSize: number; compressed: Uint8Array }[] = [];
 
-  // Fetch objects in parallel batches from R2, then compress sequentially via WASM
-  const FETCH_CONCURRENCY = 50;
-  for (let i = 0; i < objectShas.length; i += FETCH_CONCURRENCY) {
-    const batch = objectShas.slice(i, i + FETCH_CONCURRENCY);
-    const fetched = await Promise.all(
-      batch.map(sha1 => engine.readObject(sha1).then(obj => ({ sha1, obj })))
-    );
-    for (const { sha1, obj } of fetched) {
+  // Collect output as array of chunks to avoid buffer-doubling memory spikes.
+  // Each batch produces one chunk; final concatenation happens once at the end.
+  const chunks: Uint8Array[] = [];
+  let totalSize = 0;
+  let objectCount = 0;
+
+  // Reserve 12 bytes for the header (patched after all objects are counted)
+  const header = new Uint8Array(12);
+  header.set(PACK_SIGNATURE, 0);
+  writeUint32BE(header, 4, 2); // version
+  // bytes 8-11 (count) written after loop
+  chunks.push(header);
+  totalSize += 12;
+
+  // Read objects in batches of 500 to bound memory
+  const BATCH = 500;
+  for (let i = 0; i < objectShas.length; i += BATCH) {
+    const batchShas = objectShas.slice(i, i + BATCH);
+    const batchObjects = await engine.readObjects(batchShas);
+
+    for (const sha1 of batchShas) {
+      const obj = batchObjects.get(sha1);
       if (!obj) {
         console.error(`buildPackfile: missing object ${sha1}, skipping`);
         continue;
@@ -50,49 +63,36 @@ export async function buildPackfile(
         console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
         continue;
       }
-      objects.push({
-        packType: objectToPackType(obj.type),
-        uncompressedSize: obj.content.length,
-        compressed,
-      });
+
+      const packType = objectToPackType(obj.type);
+      const headerLen = typeSizeHeaderLen(packType, obj.content.length);
+      const entry = new Uint8Array(headerLen + compressed.length);
+      writeTypeSizeHeader(entry, 0, packType, obj.content.length);
+      entry.set(compressed, headerLen);
+      chunks.push(entry);
+      totalSize += entry.length;
+      objectCount++;
     }
+    // batchObjects goes out of scope here — GC can reclaim decompressed data
   }
 
-  // Calculate total size
-  let totalSize = 12; // header
-  for (const obj of objects) {
-    totalSize += typeSizeHeaderLen(obj.packType, obj.uncompressedSize);
-    totalSize += obj.compressed.length;
-  }
-  totalSize += 20; // trailer SHA-1
+  // Write final object count into header
+  writeUint32BE(header, 8, objectCount);
 
-  // Build packfile
-  const pack = new Uint8Array(totalSize + 64); // extra room
+  // Concatenate all chunks into final packfile buffer
+  const pack = new Uint8Array(totalSize + 20); // +20 for SHA-1 trailer
   let offset = 0;
-
-  // Header: "PACK" + version(2) + count
-  pack.set(PACK_SIGNATURE, 0);
-  offset += 4;
-  writeUint32BE(pack, offset, 2); // version
-  offset += 4;
-  writeUint32BE(pack, offset, objects.length);
-  offset += 4;
-
-  // Objects
-  for (const obj of objects) {
-    offset += writeTypeSizeHeader(pack, offset, obj.packType, obj.uncompressedSize);
-    pack.set(obj.compressed, offset);
-    offset += obj.compressed.length;
+  for (const chunk of chunks) {
+    pack.set(chunk, offset);
+    offset += chunk.length;
   }
 
-  // Trailer: SHA-1 of pack content (use crypto API to avoid copying
-  // the entire packfile into the 32MB WASM arena)
+  // Trailer: SHA-1 of pack content
   const hashBuf = await crypto.subtle.digest("SHA-1", pack.subarray(0, offset));
-  const digest = new Uint8Array(hashBuf);
-  pack.set(digest, offset);
+  pack.set(new Uint8Array(hashBuf), offset);
   offset += 20;
 
-  return pack.slice(0, offset);
+  return pack.subarray(0, offset);
 }
 
 function writeUint32BE(buf: Uint8Array, offset: number, value: number): void {

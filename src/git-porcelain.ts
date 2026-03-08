@@ -771,14 +771,15 @@ export class GitPorcelain {
       }
     }
 
-    // Fetch uncached sizes from R2 in parallel and cache them
+    // Batch-read uncached sizes (groups by chunk for efficiency)
     if (uncached.length > 0) {
-      const reads = await Promise.all(
-        uncached.map(f => this.engine.readObject(f.sha).then(obj => ({ sha: f.sha, size: obj?.content.length ?? 0 })))
-      );
-      for (const { sha, size } of reads) {
+      const uncachedShas = uncached.map(f => f.sha);
+      const objects = await this.engine.readObjects(uncachedShas);
+      for (const f of uncached) {
+        const obj = objects.get(f.sha);
+        const size = obj?.content.length ?? 0;
         totalSize += size;
-        this.engine.indexFileSize(sha, size);
+        this.engine.indexFileSize(f.sha, size);
       }
     }
 

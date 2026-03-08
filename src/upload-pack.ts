@@ -78,7 +78,7 @@ export async function handleUploadPack(
   // Collect all objects needed: walk from wants, stop at haves
   const needed = await collectObjects(engine, wants, haves);
 
-  // Build packfile
+  // Build packfile — reads objects in batches to bound memory
   const packData = await buildPackfile(engine, needed);
 
   // Response: ACK (if common commits found) or NAK + packfile in sideband-64k
@@ -86,35 +86,33 @@ export async function handleUploadPack(
     ? encodePktLine(`ACK ${commonSha}\n`)
     : encodePktLine("NAK\n");
 
-  // Split packfile into sideband pkt-lines
-  // Git LARGE_PACKET_MAX = 65520 total, minus 4 header, minus 1 channel byte = 65515
+  // Stream sideband-wrapped packfile to avoid holding packData + sideband + response
+  // simultaneously (~3x memory). The ReadableStream emits one 65KB sideband chunk at
+  // a time, so peak memory stays at packData size + one chunk.
   const MAX_SIDEBAND_DATA = 65515;
-  const sidebandPkts: Uint8Array[] = [];
-  let packOffset = 0;
-  while (packOffset < packData.length) {
-    const chunkLen = Math.min(packData.length - packOffset, MAX_SIDEBAND_DATA);
-    const payload = new Uint8Array(1 + chunkLen);
-    payload[0] = 0x01; // sideband channel 1 (pack data)
-    payload.set(packData.subarray(packOffset, packOffset + chunkLen), 1);
-    sidebandPkts.push(encodePktLineBytes(payload));
-    packOffset += chunkLen;
-  }
+  const readable = new ReadableStream({
+    start(controller) {
+      // ACK or NAK
+      controller.enqueue(ackOrNak);
 
-  // Total: ACK/NAK + sideband pkt-lines + flush
-  const totalLen = ackOrNak.length
-    + sidebandPkts.reduce((acc, p) => acc + p.length, 0)
-    + FLUSH_PKT.length;
-  const responseBody = new Uint8Array(totalLen);
-  let pos = 0;
-  responseBody.set(ackOrNak, pos);
-  pos += ackOrNak.length;
-  for (const pkt of sidebandPkts) {
-    responseBody.set(pkt, pos);
-    pos += pkt.length;
-  }
-  responseBody.set(FLUSH_PKT, pos);
+      // Packfile in sideband channel 1
+      let packOffset = 0;
+      while (packOffset < packData.length) {
+        const chunkLen = Math.min(packData.length - packOffset, MAX_SIDEBAND_DATA);
+        const payload = new Uint8Array(1 + chunkLen);
+        payload[0] = 0x01;
+        payload.set(packData.subarray(packOffset, packOffset + chunkLen), 1);
+        controller.enqueue(encodePktLineBytes(payload));
+        packOffset += chunkLen;
+      }
 
-  return new Response(responseBody, {
+      // Flush
+      controller.enqueue(FLUSH_PKT);
+      controller.close();
+    },
+  });
+
+  return new Response(readable, {
     headers: {
       "Content-Type": "application/x-git-upload-pack-result",
       "Cache-Control": "no-cache",
@@ -143,17 +141,17 @@ async function collectObjects(
     }
     if (batch.length === 0) break;
 
-    // Fetch batch in parallel (up to 50 concurrent R2 reads)
-    const CONCURRENCY = 50;
+    // Read in sub-batches of 500 to bound memory — blobs at the frontier
+    // level can number in the thousands and don't need their content walked.
+    const SUB_BATCH = 500;
     const nextFrontier: string[] = [];
 
-    for (let i = 0; i < batch.length; i += CONCURRENCY) {
-      const chunk = batch.slice(i, i + CONCURRENCY);
-      const fetched = await Promise.all(
-        chunk.map(sha1 => engine.readObject(sha1).then(obj => ({ sha1, obj })))
-      );
+    for (let s = 0; s < batch.length; s += SUB_BATCH) {
+      const subBatch = batch.slice(s, s + SUB_BATCH);
+      const objects = await engine.readObjects(subBatch);
 
-      for (const { sha1, obj } of fetched) {
+      for (const sha1 of subBatch) {
+        const obj = objects.get(sha1);
         if (!obj) continue;
         result.push(sha1);
         const { type, content } = obj;
@@ -193,6 +191,7 @@ async function collectObjects(
           if (objLine) nextFrontier.push(objLine.slice(7, 47));
         }
       }
+      // objects Map released here — GC can reclaim decompressed data per sub-batch
     }
 
     frontier = nextFrontier;

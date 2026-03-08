@@ -80,15 +80,47 @@ export async function materializeWorktree(
 
   // Full materialization: delete all old files, write all new files
   await deleteByPrefix(env.OBJECTS, prefix);
+
   const entries = [...newFiles.entries()];
-  const WRITE_CONCURRENCY = 50;
-  for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
-    const batch = entries.slice(i, i + WRITE_CONCURRENCY);
-    await Promise.all(
-      batch.map(([filepath, blobSha]) =>
-        writeBlobToWorktree(engine, env, repoPath, branch, filepath, blobSha, objectCache)
-      )
-    );
+
+  // Process in read+write batches of 500 to bound memory and yield control
+  // between batches so the DO can serve incoming requests (e.g. clone).
+  const READ_BATCH = 500;
+  const WRITE_CONCURRENCY = 100;
+
+  for (let r = 0; r < entries.length; r += READ_BATCH) {
+    const readSlice = entries.slice(r, r + READ_BATCH);
+    const uncachedShas = readSlice
+      .map(([, sha]) => sha)
+      .filter(sha => !objectCache?.has(sha));
+    const batchRead = uncachedShas.length > 0
+      ? await engine.readObjects(uncachedShas)
+      : new Map<string, { type: number; content: Uint8Array }>();
+
+    for (let i = 0; i < readSlice.length; i += WRITE_CONCURRENCY) {
+      const batch = readSlice.slice(i, i + WRITE_CONCURRENCY);
+      await Promise.all(
+        batch.map(([filepath, blobSha]) => {
+          let content: Uint8Array | undefined;
+          if (objectCache?.has(blobSha)) {
+            const cached = objectCache.get(blobSha)!;
+            if (cached.type === OBJ_BLOB) content = cached.data;
+          } else {
+            const obj = batchRead.get(blobSha);
+            if (obj?.type === OBJ_BLOB) content = obj.content;
+          }
+          if (!content) {
+            console.error(`checkout: cannot read blob ${blobSha} for ${filepath}`);
+            return Promise.resolve();
+          }
+          return env.OBJECTS.put(`${repoPath}/worktrees/${branch}/${filepath}`, content);
+        })
+      );
+    }
+    // batchRead released here; yield to let DO process pending fetch requests
+    if (r + READ_BATCH < entries.length) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
 }
 

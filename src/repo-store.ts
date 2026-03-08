@@ -71,6 +71,17 @@ export class RepoStore extends DurableObject<Env> {
         size INTEGER NOT NULL
       )
     `);
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS object_chunks (
+        sha TEXT PRIMARY KEY,
+        chunk_key TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL,
+        byte_length INTEGER NOT NULL
+      )
+    `);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_object_chunks_key ON object_chunks (chunk_key)
+    `);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -92,7 +103,11 @@ export class RepoStore extends DurableObject<Env> {
 
       case "receive-pack": {
         const body = new Uint8Array(await request.arrayBuffer());
-        return handleReceivePack(engine, body, this.env, repoPath);
+        const { response, backgroundWork } = await handleReceivePack(engine, body, this.env, repoPath);
+        if (backgroundWork) {
+          this.ctx.waitUntil(backgroundWork);
+        }
+        return response;
       }
 
       case "head": {

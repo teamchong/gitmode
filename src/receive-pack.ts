@@ -36,7 +36,7 @@ export async function handleReceivePack(
   body: Uint8Array,
   env?: Env,
   repoPath?: string
-): Promise<Response> {
+): Promise<{ response: Response; backgroundWork?: Promise<void> }> {
   // Parse ref update commands and capabilities
   const updates: RefUpdate[] = [];
   let offset = 0;
@@ -119,7 +119,9 @@ export async function handleReceivePack(
     // ignore if already exists
   }
 
-  // Index new commits and materialize worktrees for updated branch refs
+  // Index new commits (sync — fast SQLite inserts) and schedule worktree
+  // materialization (async — runs after response is sent to unblock git client).
+  const worktreePromises: Promise<void>[] = [];
   if (env && repoPath) {
     for (const update of updates) {
       if (update.newSha === ZERO_SHA) continue;
@@ -127,20 +129,20 @@ export async function handleReceivePack(
       const resultLine = results.find((r) => r.startsWith(`ok ${update.refname}`));
       if (!resultLine) continue;
 
-      // Index commits between old and new SHA
+      // Index commits — fast, uses cached objects from unpack
       try {
         await indexNewCommits(engine, update.oldSha, update.newSha);
       } catch (err) {
         console.error(`commit indexing failed for ${update.refname}: ${err}`);
       }
 
+      // Schedule worktree materialization (non-blocking)
       const branch = update.refname.replace(/^refs\/heads\//, "");
-      try {
-        const oldSha = update.oldSha !== ZERO_SHA ? update.oldSha : undefined;
-        await materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha, objectCache);
-      } catch (err) {
-        console.error(`checkout failed for ${branch}: ${err}`);
-      }
+      const oldSha = update.oldSha !== ZERO_SHA ? update.oldSha : undefined;
+      worktreePromises.push(
+        materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha, objectCache)
+          .catch(err => console.error(`checkout failed for ${branch}: ${err}`))
+      );
     }
   }
 
@@ -170,12 +172,26 @@ export async function handleReceivePack(
     responseBody = reportBuf;
   }
 
-  return new Response(responseBody, {
+  const response = new Response(responseBody, {
     headers: {
       "Content-Type": "application/x-git-receive-pack-result",
       "Cache-Control": "no-cache",
     },
   });
+
+  // Worktree materialization: defer for large repos (>500 objects),
+  // run inline for small pushes to maintain test consistency
+  const isLargePush = objectCache ? objectCache.size > 500 : false;
+
+  if (!isLargePush && worktreePromises.length > 0) {
+    await Promise.all(worktreePromises);
+  }
+
+  const backgroundWork = isLargePush && worktreePromises.length > 0
+    ? Promise.all(worktreePromises).then(() => {})
+    : undefined;
+
+  return { response, backgroundWork };
 }
 
 /** Walk commits from newSha back to oldSha and index each one. */

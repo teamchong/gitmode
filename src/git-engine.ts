@@ -48,6 +48,20 @@ export class GitEngine {
   }
 
   async getObject(sha1Hex: string): Promise<Uint8Array | null> {
+    // Check chunk index first (SQLite lookup, then R2 range read)
+    if (this.sql) {
+      const rows = [...this.sql.exec(
+        "SELECT chunk_key, byte_offset, byte_length FROM object_chunks WHERE sha = ?",
+        sha1Hex
+      )];
+      if (rows.length > 0) {
+        const obj = await this.objects.get(rows[0].chunk_key as string, {
+          range: { offset: rows[0].byte_offset as number, length: rows[0].byte_length as number },
+        });
+        if (obj) return new Uint8Array(await obj.arrayBuffer());
+      }
+    }
+    // Fall back to loose object
     const obj = await this.objects.get(this.objectKey(sha1Hex));
     if (!obj) return null;
     return new Uint8Array(await obj.arrayBuffer());
@@ -58,6 +72,13 @@ export class GitEngine {
   }
 
   async hasObject(sha1Hex: string): Promise<boolean> {
+    // Check chunk index first (pure SQLite — no R2 round trip)
+    if (this.sql) {
+      const rows = [...this.sql.exec(
+        "SELECT 1 FROM object_chunks WHERE sha = ?", sha1Hex
+      )];
+      if (rows.length > 0) return true;
+    }
     const head = await this.objects.head(this.objectKey(sha1Hex));
     return head !== null;
   }
@@ -91,14 +112,177 @@ export class GitEngine {
     return { sha1Hex, compressed };
   }
 
-  /** Batch write multiple objects to R2 in parallel. */
+  /** Batch write multiple objects to R2, bundled into ~4MB chunks with SQLite index. */
   async putObjects(entries: Array<{ sha1Hex: string; compressed: Uint8Array }>): Promise<void> {
-    // Run up to 50 concurrent R2 PUTs
-    const CONCURRENCY = 50;
-    for (let i = 0; i < entries.length; i += CONCURRENCY) {
-      const batch = entries.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(e => this.putObject(e.sha1Hex, e.compressed)));
+    if (!this.sql || entries.length === 0) {
+      // No DO context — fall back to individual puts
+      const CONCURRENCY = 50;
+      for (let i = 0; i < entries.length; i += CONCURRENCY) {
+        const batch = entries.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map(e => this.putObject(e.sha1Hex, e.compressed)));
+      }
+      return;
     }
+
+    // Bundle objects into ~2MB chunks, store each chunk as one R2 key
+    const CHUNK_TARGET = 2 * 1024 * 1024;
+    let parts: Uint8Array[] = [];
+    let currentSize = 0;
+    let indexEntries: Array<{ sha: string; offset: number; length: number }> = [];
+
+    for (const entry of entries) {
+      indexEntries.push({
+        sha: entry.sha1Hex,
+        offset: currentSize,
+        length: entry.compressed.length,
+      });
+      parts.push(entry.compressed);
+      currentSize += entry.compressed.length;
+
+      if (currentSize >= CHUNK_TARGET) {
+        await this.flushChunk(parts, currentSize, indexEntries);
+        parts = [];
+        currentSize = 0;
+        indexEntries = [];
+      }
+    }
+
+    if (indexEntries.length > 0) {
+      await this.flushChunk(parts, currentSize, indexEntries);
+    }
+  }
+
+  private async flushChunk(
+    parts: Uint8Array[],
+    totalSize: number,
+    entries: Array<{ sha: string; offset: number; length: number }>,
+  ): Promise<void> {
+    // Concatenate parts into a single blob
+    const blob = new Uint8Array(totalSize);
+    let pos = 0;
+    for (const part of parts) {
+      blob.set(part, pos);
+      pos += part.length;
+    }
+
+    const chunkKey = `${this.repo}/chunks/${crypto.randomUUID()}`;
+    await this.objects.put(chunkKey, blob);
+
+    // Index all objects in this chunk
+    const sql = this.sql!;
+    for (const e of entries) {
+      sql.exec(
+        "INSERT OR IGNORE INTO object_chunks (sha, chunk_key, byte_offset, byte_length) VALUES (?, ?, ?, ?)",
+        e.sha, chunkKey, e.offset, e.length
+      );
+    }
+  }
+
+  /**
+   * Batch read multiple objects, grouping by chunk for efficiency.
+   * Returns a Map of sha -> { type, content }.
+   * For 10K objects across 50 chunks, this does ~50 R2 GETs instead of 10K.
+   */
+  async readObjects(
+    shas: string[]
+  ): Promise<Map<string, { type: number; content: Uint8Array }>> {
+    const result = new Map<string, { type: number; content: Uint8Array }>();
+    if (shas.length === 0) return result;
+
+    let remaining = shas;
+
+    // Phase 1: batch-read from chunk index (group by chunk_key)
+    if (this.sql) {
+      const indexed = new Map<string, { chunk_key: string; offset: number; length: number }>();
+      for (let i = 0; i < shas.length; i += 100) {
+        const batch = shas.slice(i, i + 100);
+        const params = batch.map(() => "?").join(",");
+        for (const row of this.sql.exec(
+          `SELECT sha, chunk_key, byte_offset, byte_length FROM object_chunks WHERE sha IN (${params})`,
+          ...batch
+        )) {
+          indexed.set(row.sha as string, {
+            chunk_key: row.chunk_key as string,
+            offset: row.byte_offset as number,
+            length: row.byte_length as number,
+          });
+        }
+      }
+
+      if (indexed.size > 0) {
+        // Group by chunk_key
+        const byChunk = new Map<string, Array<{ sha: string; offset: number; length: number }>>();
+        for (const [sha, info] of indexed) {
+          let arr = byChunk.get(info.chunk_key);
+          if (!arr) { arr = []; byChunk.set(info.chunk_key, arr); }
+          arr.push({ sha, offset: info.offset, length: info.length });
+        }
+
+        // Fetch each chunk once, extract all objects
+        const CONCURRENCY = 10;
+        const chunkKeys = [...byChunk.keys()];
+        for (let i = 0; i < chunkKeys.length; i += CONCURRENCY) {
+          const batch = chunkKeys.slice(i, i + CONCURRENCY);
+          const fetched = await Promise.all(
+            batch.map(key => this.objects.get(key).then(obj => ({ key, obj })))
+          );
+          for (const { key, obj } of fetched) {
+            if (!obj) continue;
+            const data = new Uint8Array(await obj.arrayBuffer());
+            for (const e of byChunk.get(key)!) {
+              const compressed = data.subarray(e.offset, e.offset + e.length);
+              const parsed = this.decompressObject(compressed);
+              if (parsed) result.set(e.sha, parsed);
+            }
+          }
+        }
+
+        remaining = shas.filter(s => !result.has(s));
+      }
+    }
+
+    // Phase 2: fall back to individual loose object reads
+    if (remaining.length > 0) {
+      const CONCURRENCY = 50;
+      for (let i = 0; i < remaining.length; i += CONCURRENCY) {
+        const batch = remaining.slice(i, i + CONCURRENCY);
+        const fetched = await Promise.all(
+          batch.map(sha => this.readObject(sha).then(obj => ({ sha, obj })))
+        );
+        for (const { sha, obj } of fetched) {
+          if (obj) result.set(sha, obj);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /** Decompress a raw git object (zlib compressed full object with header). */
+  private decompressObject(
+    compressed: Uint8Array
+  ): { type: number; content: Uint8Array } | null {
+    let raw: Uint8Array | null = null;
+
+    if (this.wasm) {
+      for (const multiplier of [4, 16, 64, 256]) {
+        const maxSize = Math.min(
+          Math.max(compressed.length * multiplier, 65536),
+          32 * 1024 * 1024
+        );
+        const result = this.wasm.zlibInflate(compressed, maxSize);
+        if (result.length > 0) { raw = result; break; }
+      }
+    }
+
+    if (!raw || raw.length === 0) return null;
+
+    const spaceIdx = raw.indexOf(0x20);
+    const nullIdx = raw.indexOf(0x00);
+    if (spaceIdx === -1 || nullIdx === -1) return null;
+
+    const typeStr = decoder.decode(raw.subarray(0, spaceIdx));
+    return { type: nameToType(typeStr), content: raw.subarray(nullIdx + 1) };
   }
 
   getWasmPublic(): Promise<WasmEngine> {
