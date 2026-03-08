@@ -1160,48 +1160,75 @@ export class GitPorcelain {
 
   private async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
     const visited = new Set<string>();
-    const queue = [descendant];
-    while (queue.length > 0) {
-      const sha = queue.shift()!;
-      if (sha === ancestor) return true;
-      if (visited.has(sha)) continue;
-      visited.add(sha);
-      const obj = await this.engine.readObject(sha);
-      if (!obj || obj.type !== OBJ_COMMIT) continue;
-      const info = parseCommit(sha, obj.content);
-      queue.push(...info.parents);
+    let frontier = [descendant];
+    const MAX_DEPTH = 10000;
+
+    while (frontier.length > 0 && visited.size < MAX_DEPTH) {
+      const batch: string[] = [];
+      for (const sha of frontier) {
+        if (sha === ancestor) return true;
+        if (!visited.has(sha)) { visited.add(sha); batch.push(sha); }
+      }
+      if (batch.length === 0) break;
+
+      const objects = await this.engine.readObjects(batch);
+      const nextFrontier: string[] = [];
+      for (const sha of batch) {
+        const obj = objects.get(sha);
+        if (!obj || obj.type !== OBJ_COMMIT) continue;
+        nextFrontier.push(...parseCommit(sha, obj.content).parents);
+      }
+      frontier = nextFrontier;
     }
     return false;
   }
 
   private async findMergeBase(a: string, b: string): Promise<string | null> {
-    // BFS from both sides, first intersection is the merge base
     const visitedA = new Set<string>();
     const visitedB = new Set<string>();
-    const queueA = [a];
-    const queueB = [b];
+    let frontierA = [a];
+    let frontierB = [b];
+    const MAX_DEPTH = 10000;
 
-    while (queueA.length > 0 || queueB.length > 0) {
-      if (queueA.length > 0) {
-        const sha = queueA.shift()!;
-        if (visitedB.has(sha)) return sha;
-        if (!visitedA.has(sha)) {
-          visitedA.add(sha);
-          const obj = await this.engine.readObject(sha);
-          if (obj && obj.type === OBJ_COMMIT) {
-            queueA.push(...parseCommit(sha, obj.content).parents);
+    while ((frontierA.length > 0 || frontierB.length > 0) && (visitedA.size + visitedB.size) < MAX_DEPTH) {
+      // Process side A
+      if (frontierA.length > 0) {
+        const batch: string[] = [];
+        for (const sha of frontierA) {
+          if (visitedB.has(sha)) return sha;
+          if (!visitedA.has(sha)) { visitedA.add(sha); batch.push(sha); }
+        }
+        if (batch.length > 0) {
+          const objects = await this.engine.readObjects(batch);
+          frontierA = [];
+          for (const sha of batch) {
+            const obj = objects.get(sha);
+            if (obj && obj.type === OBJ_COMMIT) {
+              frontierA.push(...parseCommit(sha, obj.content).parents);
+            }
           }
+        } else {
+          frontierA = [];
         }
       }
-      if (queueB.length > 0) {
-        const sha = queueB.shift()!;
-        if (visitedA.has(sha)) return sha;
-        if (!visitedB.has(sha)) {
-          visitedB.add(sha);
-          const obj = await this.engine.readObject(sha);
-          if (obj && obj.type === OBJ_COMMIT) {
-            queueB.push(...parseCommit(sha, obj.content).parents);
+      // Process side B
+      if (frontierB.length > 0) {
+        const batch: string[] = [];
+        for (const sha of frontierB) {
+          if (visitedA.has(sha)) return sha;
+          if (!visitedB.has(sha)) { visitedB.add(sha); batch.push(sha); }
+        }
+        if (batch.length > 0) {
+          const objects = await this.engine.readObjects(batch);
+          frontierB = [];
+          for (const sha of batch) {
+            const obj = objects.get(sha);
+            if (obj && obj.type === OBJ_COMMIT) {
+              frontierB.push(...parseCommit(sha, obj.content).parents);
+            }
           }
+        } else {
+          frontierB = [];
         }
       }
     }
