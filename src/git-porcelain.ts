@@ -488,8 +488,9 @@ export class GitPorcelain {
     if (refB) {
       const shaB = await this.resolveRef(refB);
       if (!shaB) return [];
-      const commitA = await this.engine.readObject(shaA);
-      const commitB = await this.engine.readObject(shaB);
+      const objs = await this.engine.readObjects([shaA, shaB]);
+      const commitA = objs.get(shaA);
+      const commitB = objs.get(shaB);
       if (!commitA || !commitB) return [];
       treeA = parseCommit(shaA, commitA.content).tree;
       treeB = parseCommit(shaB, commitB.content).tree;
@@ -561,9 +562,12 @@ export class GitPorcelain {
     // Non-FF: find merge base and create merge commit
     const base = await this.findMergeBase(targetSha, sourceSha);
 
-    // Get trees
-    const targetCommit = await this.engine.readObject(targetSha);
-    const sourceCommit = await this.engine.readObject(sourceSha);
+    // Get trees — batch-read all commits in one call
+    const commitShas = [targetSha, sourceSha];
+    if (base) commitShas.push(base);
+    const commitObjs = await this.engine.readObjects(commitShas);
+    const targetCommit = commitObjs.get(targetSha);
+    const sourceCommit = commitObjs.get(sourceSha);
     if (!targetCommit || !sourceCommit) throw new Error("Cannot read merge commits");
 
     const targetTree = parseCommit(targetSha, targetCommit.content).tree;
@@ -571,7 +575,7 @@ export class GitPorcelain {
 
     let baseTree = "";
     if (base) {
-      const baseCommit = await this.engine.readObject(base);
+      const baseCommit = commitObjs.get(base);
       if (baseCommit) baseTree = parseCommit(base, baseCommit.content).tree;
     }
 
