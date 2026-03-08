@@ -7,8 +7,6 @@ settings:
 overrides:
   rollup: '>=4.58.0'
 
-pnpmfileChecksum: sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
-
 importers:
 
   .:
