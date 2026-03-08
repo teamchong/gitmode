@@ -66,12 +66,24 @@ export async function unpackPackfile(
   const wasm = await engine.getWasmPublic();
 
   // Verify header
-  if (packData.length < 12) throw new Error("Packfile too short");
+  if (packData.length < 32) throw new Error("Packfile too short");
   const sig = decoder.decode(packData.subarray(0, 4));
   if (sig !== "PACK") throw new Error("Invalid packfile signature");
 
   const version = readUint32BE(packData, 4);
   if (version !== 2) throw new Error(`Unsupported pack version: ${version}`);
+
+  // Verify SHA-1 trailer (last 20 bytes = SHA-1 of all preceding bytes)
+  const trailerOffset = packData.length - 20;
+  const expectedHash = new Uint8Array(
+    await crypto.subtle.digest("SHA-1", packData.subarray(0, trailerOffset))
+  );
+  const actualHash = packData.subarray(trailerOffset);
+  for (let i = 0; i < 20; i++) {
+    if (expectedHash[i] !== actualHash[i]) {
+      throw new Error("Packfile checksum mismatch — data may be corrupted");
+    }
+  }
 
   const numObjects = readUint32BE(packData, 8);
 

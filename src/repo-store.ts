@@ -221,7 +221,6 @@ async function handleApiAction(
       const path = url.searchParams.get("path") ?? "";
       const content = await porcelain.catFile(ref, path);
       if (!content) return Response.json({ error: "not found" }, { status: 404 });
-      // Return as base64 for binary safety
       const text = decoder.decode(content);
       return Response.json({ content: text, size: content.length });
     }
@@ -331,7 +330,7 @@ async function handleApiAction(
     // --- log ---
     case "log": {
       const ref = url.searchParams.get("ref") ?? "HEAD";
-      const maxCount = parseInt(url.searchParams.get("max") ?? "50", 10);
+      const maxCount = Math.min(parseInt(url.searchParams.get("max") ?? "50", 10) || 50, 10000);
       const commits = await porcelain.log(ref, maxCount);
       return Response.json({ commits });
     }
@@ -424,7 +423,7 @@ async function handleApiAction(
     case "file-log": {
       const ref = url.searchParams.get("ref") ?? "HEAD";
       const path = url.searchParams.get("path") ?? "";
-      const maxCount = parseInt(url.searchParams.get("max") ?? "50", 10);
+      const maxCount = Math.min(parseInt(url.searchParams.get("max") ?? "50", 10) || 50, 10000);
       if (!path) return Response.json({ error: "path is required" }, { status: 400 });
       const commits = await porcelain.fileLog(ref, path, maxCount);
       return Response.json({ commits });

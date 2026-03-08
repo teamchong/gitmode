@@ -171,15 +171,23 @@ async function collectObjects(
             }
           }
         } else if (type === 2) {
-          // Tree — parse entries for subtrees and blobs
+          // Tree — parse entries: only walk subtrees, add blobs directly to result
           let pos = 0;
           while (pos < content.length) {
+            const modeStart = pos;
             while (pos < content.length && content[pos] !== 0x20) pos++;
+            const isTree = (pos - modeStart >= 5) && content[modeStart] === 0x34 && content[modeStart + 1] === 0x30; // "40..."
             pos++;
             while (pos < content.length && content[pos] !== 0x00) pos++;
             pos++;
             if (pos + 20 <= content.length) {
-              nextFrontier.push(toHex(content.subarray(pos, pos + 20)));
+              const entrySha = toHex(content.subarray(pos, pos + 20));
+              if (isTree) {
+                nextFrontier.push(entrySha);
+              } else if (!visited.has(entrySha) && !haves.has(entrySha)) {
+                visited.add(entrySha);
+                result.push(entrySha);
+              }
               pos += 20;
             } else {
               break;
