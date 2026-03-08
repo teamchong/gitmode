@@ -981,19 +981,30 @@ export class GitPorcelain {
   }
 
   private async walkTree(treeSha: string, prefix: string): Promise<FileEntry[]> {
-    const obj = await this.engine.readObject(treeSha);
-    if (!obj || obj.type !== OBJ_TREE) return [];
-    const entries = parseTreeEntries(obj.content);
     const result: FileEntry[] = [];
+    // BFS: process trees level-by-level, batch-reading sibling subtrees
+    let frontier: Array<{ sha: string; prefix: string }> = [{ sha: treeSha, prefix }];
 
-    for (const entry of entries) {
-      const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.mode.startsWith("40")) {
-        const children = await this.walkTree(entry.sha, fullPath);
-        result.push(...children);
-      } else {
-        result.push({ path: fullPath, mode: entry.mode, type: "blob", sha: entry.sha });
+    while (frontier.length > 0) {
+      const shas = frontier.map(f => f.sha);
+      const objects = await this.engine.readObjects(shas);
+      const nextFrontier: Array<{ sha: string; prefix: string }> = [];
+
+      for (const item of frontier) {
+        const obj = objects.get(item.sha);
+        if (!obj || obj.type !== OBJ_TREE) continue;
+        const entries = parseTreeEntries(obj.content);
+
+        for (const entry of entries) {
+          const fullPath = item.prefix ? `${item.prefix}/${entry.name}` : entry.name;
+          if (entry.mode.startsWith("40")) {
+            nextFrontier.push({ sha: entry.sha, prefix: fullPath });
+          } else {
+            result.push({ path: fullPath, mode: entry.mode, type: "blob", sha: entry.sha });
+          }
+        }
       }
+      frontier = nextFrontier;
     }
     return result;
   }
@@ -1067,38 +1078,73 @@ export class GitPorcelain {
   }
 
   private async diffTrees(treeASha: string, treeBSha: string, prefix: string): Promise<DiffEntry[]> {
-    const entriesA = treeASha ? await this.readTreeMap(treeASha) : new Map();
-    const entriesB = treeBSha ? await this.readTreeMap(treeBSha) : new Map();
     const result: DiffEntry[] = [];
-    const allNames = new Set([...entriesA.keys(), ...entriesB.keys()]);
+    // BFS: process tree pairs level-by-level to batch R2 reads
+    let frontier: Array<{ aSha: string; bSha: string; prefix: string }> = [
+      { aSha: treeASha, bSha: treeBSha, prefix },
+    ];
 
-    for (const name of allNames) {
-      const a = entriesA.get(name);
-      const b = entriesB.get(name);
-      const fullPath = prefix ? `${prefix}/${name}` : name;
+    while (frontier.length > 0) {
+      // Batch-read all tree SHAs at this level
+      const allShas = new Set<string>();
+      for (const item of frontier) {
+        if (item.aSha) allShas.add(item.aSha);
+        if (item.bSha) allShas.add(item.bSha);
+      }
+      const objects = allShas.size > 0
+        ? await this.engine.readObjects([...allShas])
+        : new Map<string, { type: number; content: Uint8Array }>();
+      const nextFrontier: Array<{ aSha: string; bSha: string; prefix: string }> = [];
 
-      if (!a && b) {
-        if (b.mode.startsWith("40")) {
-          result.push(...await this.diffTrees("", b.sha, fullPath));
-        } else {
-          result.push({ path: fullPath, status: "added", newSha: b.sha });
-        }
-      } else if (a && !b) {
-        if (a.mode.startsWith("40")) {
-          result.push(...await this.diffTrees(a.sha, "", fullPath));
-        } else {
-          result.push({ path: fullPath, status: "deleted", oldSha: a.sha });
-        }
-      } else if (a && b && a.sha !== b.sha) {
-        if (a.mode.startsWith("40") && b.mode.startsWith("40")) {
-          result.push(...await this.diffTrees(a.sha, b.sha, fullPath));
-        } else {
-          result.push({ path: fullPath, status: "modified", oldSha: a.sha, newSha: b.sha });
+      for (const item of frontier) {
+        const entriesA = this.parseTreeMapFromObjects(objects, item.aSha);
+        const entriesB = this.parseTreeMapFromObjects(objects, item.bSha);
+        const allNames = new Set([...entriesA.keys(), ...entriesB.keys()]);
+
+        for (const name of allNames) {
+          const a = entriesA.get(name);
+          const b = entriesB.get(name);
+          const fullPath = item.prefix ? `${item.prefix}/${name}` : name;
+
+          if (!a && b) {
+            if (b.mode.startsWith("40")) {
+              nextFrontier.push({ aSha: "", bSha: b.sha, prefix: fullPath });
+            } else {
+              result.push({ path: fullPath, status: "added", newSha: b.sha });
+            }
+          } else if (a && !b) {
+            if (a.mode.startsWith("40")) {
+              nextFrontier.push({ aSha: a.sha, bSha: "", prefix: fullPath });
+            } else {
+              result.push({ path: fullPath, status: "deleted", oldSha: a.sha });
+            }
+          } else if (a && b && a.sha !== b.sha) {
+            if (a.mode.startsWith("40") && b.mode.startsWith("40")) {
+              nextFrontier.push({ aSha: a.sha, bSha: b.sha, prefix: fullPath });
+            } else {
+              result.push({ path: fullPath, status: "modified", oldSha: a.sha, newSha: b.sha });
+            }
+          }
         }
       }
+      frontier = nextFrontier;
     }
 
     return result;
+  }
+
+  private parseTreeMapFromObjects(
+    objects: Map<string, { type: number; content: Uint8Array }>,
+    treeSha: string,
+  ): Map<string, { mode: string; sha: string }> {
+    const map = new Map<string, { mode: string; sha: string }>();
+    if (!treeSha) return map;
+    const obj = objects.get(treeSha);
+    if (!obj || obj.type !== OBJ_TREE) return map;
+    for (const entry of parseTreeEntries(obj.content)) {
+      map.set(entry.name, { mode: entry.mode, sha: entry.sha });
+    }
+    return map;
   }
 
   private async readTreeMap(treeSha: string): Promise<Map<string, { mode: string; sha: string }>> {
@@ -1163,9 +1209,14 @@ export class GitPorcelain {
   }
 
   private async mergeTrees(baseSha: string, oursSha: string, theirsSha: string): Promise<string> {
-    const baseEntries = baseSha ? await this.readTreeMap(baseSha) : new Map();
-    const oursEntries = oursSha ? await this.readTreeMap(oursSha) : new Map();
-    const theirsEntries = theirsSha ? await this.readTreeMap(theirsSha) : new Map();
+    // Batch-read all 3 trees in one call
+    const treeShas = [baseSha, oursSha, theirsSha].filter(Boolean);
+    const treeObjects = treeShas.length > 0
+      ? await this.engine.readObjects(treeShas)
+      : new Map<string, { type: number; content: Uint8Array }>();
+    const baseEntries = this.parseTreeMapFromObjects(treeObjects, baseSha);
+    const oursEntries = this.parseTreeMapFromObjects(treeObjects, oursSha);
+    const theirsEntries = this.parseTreeMapFromObjects(treeObjects, theirsSha);
     const allNames = new Set([...baseEntries.keys(), ...oursEntries.keys(), ...theirsEntries.keys()]);
     const result: Array<{ mode: string; name: string; sha: string }> = [];
 
