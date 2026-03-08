@@ -726,17 +726,7 @@ export class GitPorcelain {
 
   /** Aggregate author statistics from the commit index. */
   contributors(): Array<{ name: string; commits: number; lastCommit: number }> {
-    const sql = (this.engine as any).sql as SqlStorage;
-    if (!sql) return [];
-    const rows = [...sql.exec(
-      `SELECT author, COUNT(*) as commits, MAX(timestamp) as lastCommit
-       FROM commits GROUP BY author ORDER BY commits DESC`
-    )];
-    return rows.map(r => ({
-      name: r.author as string,
-      commits: r.commits as number,
-      lastCommit: r.lastCommit as number,
-    }));
+    return this.engine.getContributors();
   }
 
   // === repo stats ===

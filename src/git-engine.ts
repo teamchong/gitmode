@@ -470,6 +470,19 @@ export class GitEngine {
     return result;
   }
 
+  getContributors(): Array<{ name: string; commits: number; lastCommit: number }> {
+    const sql = this.requireSql();
+    const rows = [...sql.exec(
+      `SELECT author, COUNT(*) as commits, MAX(timestamp) as lastCommit
+       FROM commits GROUP BY author ORDER BY commits DESC`
+    )];
+    return rows.map(r => ({
+      name: r.author as string,
+      commits: r.commits as number,
+      lastCommit: r.lastCommit as number,
+    }));
+  }
+
   getCommitCount(): number {
     const sql = this.requireSql();
     const rows = [...sql.exec("SELECT COUNT(*) as cnt FROM commits")];
