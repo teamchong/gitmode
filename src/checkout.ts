@@ -147,6 +147,8 @@ async function getTreeSha(engine: GitEngine, commitSha: string, cache?: ObjectCa
   return m[1];
 }
 
+const MAX_TREE_DEPTH = 100;
+
 /**
  * Recursively walk a git tree object, collecting filepath -> blobSha entries.
  */
@@ -156,7 +158,12 @@ async function walkTree(
   pathPrefix: string,
   files: Map<string, string>,
   cache?: ObjectCache,
+  depth = 0,
 ): Promise<void> {
+  if (depth > MAX_TREE_DEPTH) {
+    throw new Error(`Tree nesting exceeds maximum depth (${MAX_TREE_DEPTH})`);
+  }
+
   const tree = await readObjectCached(engine, treeSha, cache);
   if (!tree || tree.type !== OBJ_TREE) {
     throw new Error(`Cannot read tree ${treeSha}`);
@@ -180,7 +187,7 @@ async function walkTree(
     const fullPath = pathPrefix ? `${pathPrefix}/${name}` : name;
 
     if (mode === "40000") {
-      await walkTree(engine, sha, fullPath, files, cache);
+      await walkTree(engine, sha, fullPath, files, cache, depth + 1);
     } else {
       files.set(fullPath, sha);
     }

@@ -25,6 +25,37 @@ function wrapSideband(data: Uint8Array): Uint8Array {
   return encodePktLineBytes(payload);
 }
 
+function errorResponse(message: string, useSideband: boolean): Response {
+  const parts: Uint8Array[] = [];
+  parts.push(encodePktLine(`unpack ${message}\n`));
+  parts.push(FLUSH_PKT);
+
+  const reportLen = parts.reduce((acc, p) => acc + p.length, 0);
+  const reportBuf = new Uint8Array(reportLen);
+  let pos = 0;
+  for (const part of parts) {
+    reportBuf.set(part, pos);
+    pos += part.length;
+  }
+
+  let body: Uint8Array;
+  if (useSideband) {
+    const pkt = wrapSideband(reportBuf);
+    body = new Uint8Array(pkt.length + FLUSH_PKT.length);
+    body.set(pkt);
+    body.set(FLUSH_PKT, pkt.length);
+  } else {
+    body = reportBuf;
+  }
+
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/x-git-receive-pack-result",
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+
 interface RefUpdate {
   oldSha: string;
   newSha: string;
@@ -60,6 +91,9 @@ export async function handleReceivePack(
     }
 
     if (line.length >= 85) {
+      if (updates.length >= 1000) {
+        return { response: errorResponse("Too many ref updates (max 1000)", useSideband) };
+      }
       updates.push({
         oldSha: line.slice(0, 40),
         newSha: line.slice(41, 81),

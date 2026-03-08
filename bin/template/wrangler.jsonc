@@ -1,0 +1,34 @@
+{
+  "name": "gitmode",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // R2: git object storage + materialized worktrees
+  "r2_buckets": [
+    {
+      "binding": "OBJECTS",
+      "bucket_name": "gitmode-objects"
+    }
+  ],
+
+  // Durable Objects: per-repo SQLite for refs, metadata, permissions
+  "durable_objects": {
+    "bindings": [
+      { "name": "REPO_STORE", "class_name": "RepoStore" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RepoStore"] }
+  ],
+
+  // WASM module
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": false
+    }
+  ]
+}

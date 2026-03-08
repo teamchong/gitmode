@@ -143,13 +143,45 @@ pnpm run dev
 pnpm run deploy
 ```
 
-## npm exports
+## npm package
 
-Two tree-shakeable entry points for use as a library:
+Install gitmode as an npm package to run your own git server on Cloudflare Workers:
+
+```bash
+npx gitmode init     # Scaffold worker + wrangler config
+npx gitmode deploy   # Deploy to Cloudflare Workers
+```
+
+Or import directly into your Worker:
 
 ```ts
-import { WasmEngine } from "gitmode/server";  // Full engine (865KB WASM) — server-side git ops
-import { WasmEngine } from "gitmode/client";  // Core engine (83KB WASM) — SHA-1, zlib, delta only
+import { RepoStore, createHandler } from "gitmode";
+export { RepoStore };
+export default { fetch: createHandler() };
+```
+
+With custom auth:
+
+```ts
+import { RepoStore, createHandler } from "gitmode";
+export { RepoStore };
+const gitmode = createHandler();
+export default {
+  fetch(req, env) {
+    if (!authorize(req)) return new Response("Unauthorized", { status: 401 });
+    return gitmode(req, env);
+  }
+};
+```
+
+### Entry points
+
+Three tree-shakeable entry points:
+
+```ts
+import { createHandler, RepoStore } from "gitmode";            // Server handler + DO class
+import { WasmEngine } from "gitmode/server";   // Full engine (865KB WASM) — server-side git ops
+import { WasmEngineCore } from "gitmode/client";  // Core engine (83KB WASM) — SHA-1, zlib, delta only
 ```
 
 ## Project structure
@@ -174,9 +206,15 @@ gitmode/
 │   └── vendor/libdeflate/   Vendored libdeflate 1.25
 ├── wasm/libgit2-wasm/       libgit2 compiled to WASM
 ├── deps/libgit2/            libgit2 source (submodule)
+├── bin/
+│   ├── gitmode.mjs          CLI (npx gitmode init/deploy)
+│   └── template/            Scaffold templates for init
 ├── src/
+│   ├── index.ts             npm main entry point
 │   ├── server.ts            Server entry point (full WASM)
 │   ├── client.ts            Client entry point (core WASM)
+│   ├── handler.ts           createHandler() factory (git + REST routing)
+│   ├── env.ts               Cloudflare env bindings type
 │   ├── git-engine.ts        R2 + DO SQLite orchestration (chunk storage, batch reads)
 │   ├── git-porcelain.ts     High-level git ops (merge, cherry-pick, stats)
 │   ├── wasm-engine.ts       Typed WASM wrapper (server)
@@ -191,7 +229,7 @@ gitmode/
 │   ├── pkt-line.ts          Git pkt-line protocol framing
 │   ├── ssh-handler.ts       SSH command parser
 │   └── hex.ts               Fast hex encoding (lookup table)
-├── worker/                  Cloudflare Worker entry
+├── worker/                  Cloudflare Worker entry (with vinext UI)
 ├── app/                     vinext UI (React Server Components)
 ├── test/
 │   ├── gitmode.test.ts      Integration tests (87 tests)

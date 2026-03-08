@@ -34,13 +34,14 @@ function packTypeToObjectType(packType: number): number {
 
 function parseDeltaTargetSize(delta: Uint8Array): number {
   let pos = 0;
-  // Skip source size varint
-  while (pos < delta.length && delta[pos] & 0x80) pos++;
+  // Skip source size varint (max 10 continuation bytes)
+  let limit = Math.min(delta.length, 10);
+  while (pos < limit && delta[pos] & 0x80) pos++;
   pos++;
   // Read target size varint
   let targetSize = 0;
   let shift = 0;
-  while (pos < delta.length) {
+  while (pos < delta.length && shift < 28) {
     targetSize |= (delta[pos] & 0x7f) << shift;
     if (!(delta[pos] & 0x80)) break;
     shift += 7;
@@ -116,7 +117,7 @@ export async function unpackPackfile(
 
     // Decompress zlib data — pass a bounded slice to avoid copying the entire
     // remaining packfile into the WASM arena.
-    const maxDecompressed = Math.max(size * 4, 65536);
+    const maxDecompressed = Math.min(Math.max(size * 4, 65536), 32 * 1024 * 1024);
     const inputCap = Math.min(packData.length - offset, 30 * 1024 * 1024);
     const compressedSlice = packData.subarray(offset, offset + inputCap);
     let decompressed: Uint8Array;
@@ -252,7 +253,7 @@ function parseEntryHeader(
   let size = first & 0x0f;
   let shift = 4;
 
-  while (data[pos - 1] & 0x80) {
+  while (data[pos - 1] & 0x80 && pos < data.length && shift < 28) {
     size |= (data[pos] & 0x7f) << shift;
     shift += 7;
     pos++;
@@ -267,7 +268,8 @@ function parseOfsOffset(
 ): { negOffset: number; bytesRead: number } {
   let pos = offset;
   let value = data[pos] & 0x7f;
-  while (data[pos] & 0x80) {
+  const end = Math.min(offset + 10, data.length - 1);
+  while (data[pos] & 0x80 && pos < end) {
     pos++;
     value = ((value + 1) << 7) | (data[pos] & 0x7f);
   }

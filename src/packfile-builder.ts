@@ -65,7 +65,7 @@ export async function buildPackfile(
       }
 
       const packType = objectToPackType(obj.type);
-      const headerLen = typeSizeHeaderLen(packType, obj.content.length);
+      const headerLen = typeSizeHeaderLen(obj.content.length);
       const entry = new Uint8Array(headerLen + compressed.length);
       writeTypeSizeHeader(entry, 0, packType, obj.content.length);
       entry.set(compressed, headerLen);
@@ -128,7 +128,7 @@ function writeTypeSizeHeader(
   return pos;
 }
 
-function typeSizeHeaderLen(type: number, size: number): number {
+function typeSizeHeaderLen(size: number): number {
   let s = size >> 4;
   let len = 1;
   while (s > 0) {

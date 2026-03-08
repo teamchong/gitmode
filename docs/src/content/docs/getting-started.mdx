@@ -31,10 +31,10 @@ This compiles the Zig code, runs `wasm-metadce` to remove unused exports, and op
 
 ## Development
 
-Start a local dev server with Wrangler:
+Start a local dev server:
 
 ```bash
-pnpm wrangler dev
+pnpm run dev
 ```
 
 Then use git against the local server:
@@ -64,7 +64,7 @@ gitmode includes an SSH-to-HTTP proxy for `git clone ssh://...` support. Start i
 
 ```bash
 # Terminal 1: dev server
-pnpm wrangler dev
+pnpm run dev
 
 # Terminal 2: SSH proxy (translates SSH → HTTP)
 pnpm run ssh:proxy

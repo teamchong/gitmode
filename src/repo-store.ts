@@ -17,6 +17,54 @@ import { GitPorcelain } from "./git-porcelain";
 
 const decoder = new TextDecoder();
 
+const MAX_REF_NAME_LEN = 256;
+const MAX_MESSAGE_LEN = 1024 * 1024; // 1MB
+const MAX_DESCRIPTION_LEN = 10 * 1024; // 10KB
+const MAX_SHORT_FIELD_LEN = 1024; // 1KB (author, email, tagger)
+const INVALID_REF_CHARS = /[\x00-\x1f\x7f ~^:?*\[\\]/;
+
+function validateRefName(name: string): void {
+  if (!name || typeof name !== "string") throw new Error("Ref name is required");
+  if (name.length > MAX_REF_NAME_LEN) throw new Error("Ref name too long");
+  if (INVALID_REF_CHARS.test(name)) throw new Error("Ref name contains invalid characters");
+  if (name.includes("..")) throw new Error("Ref name cannot contain '..'");
+  if (name.includes("@{")) throw new Error("Ref name cannot contain '@{'");
+  if (name.startsWith(".") || name.endsWith(".")) throw new Error("Ref name cannot start or end with '.'");
+  if (name.endsWith(".lock")) throw new Error("Ref name cannot end with '.lock'");
+  if (name.startsWith("/") || name.endsWith("/") || name.includes("//")) throw new Error("Invalid ref name");
+}
+
+function requireString(value: unknown, field: string): string {
+  if (!value || typeof value !== "string") throw new Error(`Missing required field: ${field}`);
+  return value;
+}
+
+const MAX_FILE_PATH_LEN = 4096;
+const INVALID_PATH_SEGMENT = /[\x00-\x1f\x7f]/;
+
+function limitString(value: string | undefined, maxLen: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") return undefined;
+  if (value.length <= maxLen) return value;
+  // Avoid splitting a UTF-16 surrogate pair
+  let end = maxLen;
+  const code = value.charCodeAt(end - 1);
+  if (code >= 0xD800 && code <= 0xDBFF) end--;
+  return value.slice(0, end);
+}
+
+function validateFilePath(path: string): void {
+  if (!path || typeof path !== "string") throw new Error("File path is required");
+  if (path.length > MAX_FILE_PATH_LEN) throw new Error("File path too long");
+  if (INVALID_PATH_SEGMENT.test(path)) throw new Error("File path contains invalid characters");
+  if (path.startsWith("/") || path.endsWith("/")) throw new Error("File path cannot start or end with '/'");
+  if (path.includes("//")) throw new Error("File path contains empty segments");
+  const segments = path.split("/");
+  for (const seg of segments) {
+    if (seg === "." || seg === "..") throw new Error("File path cannot contain '.' or '..' segments");
+  }
+}
+
 export class RepoStore extends DurableObject<Env> {
   private sql: SqlStorage;
 
@@ -102,7 +150,14 @@ export class RepoStore extends DurableObject<Env> {
       }
 
       case "receive-pack": {
+        const contentLength = parseInt(request.headers.get("content-length") ?? "0", 10);
+        if (contentLength > 100 * 1024 * 1024) {
+          return new Response("Packfile too large (max 100MB)\n", { status: 413 });
+        }
         const body = new Uint8Array(await request.arrayBuffer());
+        if (body.length > 100 * 1024 * 1024) {
+          return new Response("Packfile too large (max 100MB)\n", { status: 413 });
+        }
         const { response, backgroundWork } = await handleReceivePack(engine, body, this.env, repoPath);
         if (backgroundWork) {
           this.ctx.waitUntil(backgroundWork);
@@ -211,6 +266,7 @@ async function handleApiAction(
       } catch {
         // Empty body is fine — use defaults
       }
+      if (defaultBranch) validateRefName(defaultBranch);
       porcelain.init(defaultBranch);
       return Response.json({ ok: true });
     }
@@ -251,11 +307,15 @@ async function handleApiAction(
       if (!body.ref) throw new Error("Missing required field: ref");
       if (!body.message) throw new Error("Missing required field: message");
       if (!body.files || !Array.isArray(body.files)) throw new Error("Missing required field: files");
+      if (body.message.length > MAX_MESSAGE_LEN) throw new Error("Commit message too long (max 1MB)");
+      for (const file of body.files) {
+        validateFilePath(file.path);
+      }
       const sha = await porcelain.commit({
         ref: body.ref,
         message: body.message,
-        author: body.author,
-        email: body.email,
+        author: limitString(body.author, MAX_SHORT_FIELD_LEN),
+        email: limitString(body.email, MAX_SHORT_FIELD_LEN),
         files: body.files,
         timestamp: body.timestamp,
       });
@@ -270,18 +330,22 @@ async function handleApiAction(
 
     case "create-branch": {
       const body = await request.json() as { name: string; startPoint?: string };
+      validateRefName(requireString(body.name, "name"));
       const sha = await porcelain.createBranch(body.name, body.startPoint);
       return Response.json({ sha });
     }
 
     case "delete-branch": {
       const body = await request.json() as { name: string };
+      requireString(body.name, "name");
       porcelain.deleteBranch(body.name);
       return Response.json({ ok: true });
     }
 
     case "rename-branch": {
       const body = await request.json() as { oldName: string; newName: string };
+      requireString(body.oldName, "oldName");
+      validateRefName(requireString(body.newName, "newName"));
       await porcelain.renameBranch(body.oldName, body.newName);
       return Response.json({ ok: true });
     }
@@ -289,12 +353,14 @@ async function handleApiAction(
     // --- checkout ---
     case "checkout": {
       const body = await request.json() as { branch: string };
+      requireString(body.branch, "branch");
       porcelain.checkout(body.branch);
       return Response.json({ ok: true });
     }
 
     case "detach-head": {
       const body = await request.json() as { sha: string };
+      requireString(body.sha, "sha");
       porcelain.detachHead(body.sha);
       return Response.json({ ok: true });
     }
@@ -307,6 +373,7 @@ async function handleApiAction(
 
     case "create-tag": {
       const body = await request.json() as { name: string; target?: string };
+      validateRefName(requireString(body.name, "name"));
       const sha = await porcelain.createTag(body.name, body.target);
       return Response.json({ sha });
     }
@@ -317,12 +384,20 @@ async function handleApiAction(
         tagger: string; email: string; message: string;
         timestamp?: number;
       };
+      validateRefName(requireString(body.name, "name"));
+      requireString(body.tagger, "tagger");
+      requireString(body.email, "email");
+      requireString(body.message, "message");
+      body.tagger = limitString(body.tagger, MAX_SHORT_FIELD_LEN)!;
+      body.email = limitString(body.email, MAX_SHORT_FIELD_LEN)!;
+      body.message = limitString(body.message, MAX_MESSAGE_LEN)!;
       const sha = await porcelain.createAnnotatedTag(body);
       return Response.json({ sha });
     }
 
     case "delete-tag": {
       const body = await request.json() as { name: string };
+      requireString(body.name, "name");
       porcelain.deleteTag(body.name);
       return Response.json({ ok: true });
     }
@@ -350,6 +425,13 @@ async function handleApiAction(
         author: string; email: string;
         message?: string; timestamp?: number;
       };
+      requireString(body.target, "target");
+      requireString(body.source, "source");
+      requireString(body.author, "author");
+      requireString(body.email, "email");
+      body.author = limitString(body.author, MAX_SHORT_FIELD_LEN)!;
+      body.email = limitString(body.email, MAX_SHORT_FIELD_LEN)!;
+      body.message = limitString(body.message, MAX_MESSAGE_LEN);
       const result = await porcelain.merge(body);
       return Response.json(result);
     }
@@ -368,7 +450,9 @@ async function handleApiAction(
       if (!commit) throw new Error("Missing required field: commit (or sha)");
       if (!target) throw new Error("Missing required field: target (or branch)");
       if (!body.author) throw new Error("Missing required field: author");
-      const sha = await porcelain.cherryPick({ commit, target, author: body.author, email, timestamp: body.timestamp });
+      const author = limitString(body.author, MAX_SHORT_FIELD_LEN)!;
+      const limitedEmail = limitString(email, MAX_SHORT_FIELD_LEN) ?? "";
+      const sha = await porcelain.cherryPick({ commit, target, author, email: limitedEmail, timestamp: body.timestamp });
       return Response.json({ sha });
     }
 
@@ -386,7 +470,9 @@ async function handleApiAction(
       if (!commit) throw new Error("Missing required field: commit (or sha)");
       if (!target) throw new Error("Missing required field: target (or branch)");
       if (!body.author) throw new Error("Missing required field: author");
-      const sha = await porcelain.revert({ commit, target, author: body.author, email, timestamp: body.timestamp });
+      const author = limitString(body.author, MAX_SHORT_FIELD_LEN)!;
+      const limitedEmail = limitString(email, MAX_SHORT_FIELD_LEN) ?? "";
+      const sha = await porcelain.revert({ commit, target, author, email: limitedEmail, timestamp: body.timestamp });
       return Response.json({ sha });
     }
 
@@ -400,6 +486,7 @@ async function handleApiAction(
       const target = body.target ?? body.sha;
       if (!ref) throw new Error("Missing required field: ref (or branch)");
       if (!target) throw new Error("Missing required field: target (or sha)");
+      validateRefName(ref);
       await porcelain.reset(ref, target);
       return Response.json({ ok: true });
     }
@@ -451,6 +538,10 @@ async function handleApiAction(
 
     case "update-meta": {
       const body = await request.json() as Record<string, string>;
+      if (body.description && body.description.length > MAX_DESCRIPTION_LEN) {
+        throw new Error("Description too long (max 10KB)");
+      }
+      if (body.default_branch) validateRefName(body.default_branch);
       engine.updateRepoMeta(body);
       return Response.json({ ok: true });
     }

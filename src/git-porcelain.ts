@@ -411,29 +411,23 @@ export class GitPorcelain {
     }
     if (tagRefs.length === 0) return [];
 
-    // Batch-fetch tag objects in parallel
-    const CONCURRENCY = 50;
+    const objects = await this.engine.readObjects(tagRefs.map(t => t.sha));
     const tags: TagInfo[] = [];
-    for (let i = 0; i < tagRefs.length; i += CONCURRENCY) {
-      const batch = tagRefs.slice(i, i + CONCURRENCY);
-      const fetched = await Promise.all(
-        batch.map(t => this.engine.readObject(t.sha).then(obj => ({ ...t, obj })))
-      );
-      for (const { name, sha, obj } of fetched) {
-        if (obj && obj.type === OBJ_TAG) {
-          const text = decoder.decode(obj.content);
-          const targetMatch = text.match(/^object ([0-9a-f]{40})/m);
-          const taggerMatch = text.match(/^tagger (.+?) <.+?>/m);
-          const msgStart = text.indexOf("\n\n");
-          tags.push({
-            name, sha, type: "annotated",
-            target: targetMatch?.[1],
-            tagger: taggerMatch?.[1],
-            message: msgStart >= 0 ? text.slice(msgStart + 2) : undefined,
-          });
-        } else {
-          tags.push({ name, sha, type: "lightweight" });
-        }
+    for (const { name, sha } of tagRefs) {
+      const obj = objects.get(sha);
+      if (obj && obj.type === OBJ_TAG) {
+        const text = decoder.decode(obj.content);
+        const targetMatch = text.match(/^object ([0-9a-f]{40})/m);
+        const taggerMatch = text.match(/^tagger (.+?) <.+?>/m);
+        const msgStart = text.indexOf("\n\n");
+        tags.push({
+          name, sha, type: "annotated",
+          target: targetMatch?.[1],
+          tagger: taggerMatch?.[1],
+          message: msgStart >= 0 ? text.slice(msgStart + 2) : undefined,
+        });
+      } else {
+        tags.push({ name, sha, type: "lightweight" });
       }
     }
     return tags.sort((a, b) => a.name.localeCompare(b.name));
@@ -458,19 +452,23 @@ export class GitPorcelain {
       if (batch.length === 0) break;
 
       const objects = await this.engine.readObjects(batch);
-      const nextFrontier: string[] = [];
+      const levelCommits: CommitInfo[] = [];
       for (const sha of batch) {
-        if (commits.length >= maxCount) break;
         const obj = objects.get(sha);
         if (!obj || obj.type !== OBJ_COMMIT) continue;
-        const info = parseCommit(sha, obj.content);
+        levelCommits.push(parseCommit(sha, obj.content));
+      }
+      levelCommits.sort((a, b) => b.authorTimestamp - a.authorTimestamp);
+
+      const nextFrontier: string[] = [];
+      for (const info of levelCommits) {
+        if (commits.length >= maxCount) break;
         commits.push(info);
         nextFrontier.push(...info.parents);
       }
       frontier = nextFrontier;
     }
 
-    // Sort by timestamp descending (BFS order may not be chronological)
     commits.sort((a, b) => b.authorTimestamp - a.authorTimestamp);
     return commits.slice(0, maxCount);
   }
@@ -623,7 +621,7 @@ export class GitPorcelain {
     const tildeMatch = ref.match(/^(.+)~(\d+)$/);
     if (tildeMatch) {
       let sha = await this.resolveRef(tildeMatch[1]);
-      let n = parseInt(tildeMatch[2], 10);
+      let n = Math.min(parseInt(tildeMatch[2], 10), 10000);
       while (sha && n > 0) {
         const obj = await this.engine.readObject(sha);
         if (!obj || obj.type !== OBJ_COMMIT) return null;
@@ -829,23 +827,23 @@ export class GitPorcelain {
   }): Promise<string> {
     const commitSha = await this.resolveRef(opts.commit);
     if (!commitSha) throw new Error(`Cannot resolve ${opts.commit}`);
-
-    const commitObj = await this.engine.readObject(commitSha);
-    if (!commitObj || commitObj.type !== OBJ_COMMIT) throw new Error("Not a commit");
-    const commitInfo = parseCommit(commitSha, commitObj.content);
-
     const targetSha = await this.resolveRef(opts.target);
     if (!targetSha) throw new Error(`Cannot resolve target ${opts.target}`);
 
-    const targetObj = await this.engine.readObject(targetSha);
+    const objs = await this.engine.readObjects([commitSha, targetSha]);
+    const commitObj = objs.get(commitSha);
+    if (!commitObj || commitObj.type !== OBJ_COMMIT) throw new Error("Not a commit");
+    const commitInfo = parseCommit(commitSha, commitObj.content);
+    const targetObj = objs.get(targetSha);
     if (!targetObj || targetObj.type !== OBJ_COMMIT) throw new Error("Target is not a commit");
     const targetInfo = parseCommit(targetSha, targetObj.content);
 
-    // Get parent tree of the cherry-picked commit
     let parentTree = "";
     if (commitInfo.parents.length > 0) {
       const parentObj = await this.engine.readObject(commitInfo.parents[0]);
-      if (parentObj) parentTree = parseCommit(commitInfo.parents[0], parentObj.content).tree;
+      if (parentObj && parentObj.type === OBJ_COMMIT) {
+        parentTree = parseCommit(commitInfo.parents[0], parentObj.content).tree;
+      }
     }
 
     // Three-way merge: parent tree (base) + target tree (ours) + commit tree (theirs)
@@ -879,23 +877,22 @@ export class GitPorcelain {
   }): Promise<string> {
     const commitSha = await this.resolveRef(opts.commit);
     if (!commitSha) throw new Error(`Cannot resolve ${opts.commit}`);
+    const targetSha = await this.resolveRef(opts.target);
+    if (!targetSha) throw new Error(`Cannot resolve target ${opts.target}`);
 
-    const commitObj = await this.engine.readObject(commitSha);
+    const objs = await this.engine.readObjects([commitSha, targetSha]);
+    const commitObj = objs.get(commitSha);
     if (!commitObj || commitObj.type !== OBJ_COMMIT) throw new Error("Not a commit");
     const commitInfo = parseCommit(commitSha, commitObj.content);
 
     if (commitInfo.parents.length === 0) throw new Error("Cannot revert initial commit");
 
-    const targetSha = await this.resolveRef(opts.target);
-    if (!targetSha) throw new Error(`Cannot resolve target ${opts.target}`);
-
-    const targetObj = await this.engine.readObject(targetSha);
+    const targetObj = objs.get(targetSha);
     if (!targetObj || targetObj.type !== OBJ_COMMIT) throw new Error("Target is not a commit");
     const targetInfo = parseCommit(targetSha, targetObj.content);
 
-    // Revert = three-way merge with commit tree as base, parent tree as theirs
     const parentObj = await this.engine.readObject(commitInfo.parents[0]);
-    if (!parentObj) throw new Error("Cannot read parent commit");
+    if (!parentObj || parentObj.type !== OBJ_COMMIT) throw new Error("Cannot read parent commit");
     const parentTree = parseCommit(commitInfo.parents[0], parentObj.content).tree;
 
     const mergedTree = await this.mergeTrees(commitInfo.tree, targetInfo.tree, parentTree);
@@ -1017,10 +1014,13 @@ export class GitPorcelain {
 
   private async walkTree(treeSha: string, prefix: string): Promise<FileEntry[]> {
     const result: FileEntry[] = [];
+    const MAX_DEPTH = 100;
+    let depth = 0;
     // BFS: process trees level-by-level, batch-reading sibling subtrees
     let frontier: Array<{ sha: string; prefix: string }> = [{ sha: treeSha, prefix }];
 
     while (frontier.length > 0) {
+      if (++depth > MAX_DEPTH) throw new Error(`Tree nesting exceeds maximum depth (${MAX_DEPTH})`);
       const shas = frontier.map(f => f.sha);
       const objects = await this.engine.readObjects(shas);
       const nextFrontier: Array<{ sha: string; prefix: string }> = [];
@@ -1175,17 +1175,6 @@ export class GitPorcelain {
     const map = new Map<string, { mode: string; sha: string }>();
     if (!treeSha) return map;
     const obj = objects.get(treeSha);
-    if (!obj || obj.type !== OBJ_TREE) return map;
-    for (const entry of parseTreeEntries(obj.content)) {
-      map.set(entry.name, { mode: entry.mode, sha: entry.sha });
-    }
-    return map;
-  }
-
-  private async readTreeMap(treeSha: string): Promise<Map<string, { mode: string; sha: string }>> {
-    const map = new Map<string, { mode: string; sha: string }>();
-    if (!treeSha) return map;
-    const obj = await this.engine.readObject(treeSha);
     if (!obj || obj.type !== OBJ_TREE) return map;
     for (const entry of parseTreeEntries(obj.content)) {
       map.set(entry.name, { mode: entry.mode, sha: entry.sha });

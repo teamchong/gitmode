@@ -29,7 +29,7 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
     SHA-1 hashing, zlib compression, packfile parsing, delta encoding — all in Zig compiled to WASM with SIMD acceleration.
   </Card>
   <Card title="Durable Objects + R2" icon="puzzle">
-    Each repo is a Durable Object with embedded SQLite for refs and metadata. Git objects stored in R2 as compressed loose objects.
+    Each repo is a Durable Object with embedded SQLite for refs and metadata. Git objects bundled into ~2MB R2 chunks, indexed via SQLite for O(1) lookups.
   </Card>
 </CardGrid>
 

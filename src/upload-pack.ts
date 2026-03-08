@@ -13,6 +13,7 @@
 // Server responds with packfile containing requested objects.
 
 import type { GitEngine } from "./git-engine";
+import { OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
 import { buildPackfile } from "./packfile-builder";
 import { toHex } from "./hex";
@@ -86,9 +87,9 @@ export async function handleUploadPack(
     ? encodePktLine(`ACK ${commonSha}\n`)
     : encodePktLine("NAK\n");
 
-  // Stream sideband-wrapped packfile to avoid holding packData + sideband + response
-  // simultaneously (~3x memory). The ReadableStream emits one 65KB sideband chunk at
-  // a time, so peak memory stays at packData size + one chunk.
+  // Wrap packfile in sideband-64k framing via ReadableStream.
+  // Note: start() enqueues all chunks synchronously, so peak memory is ~2x packData
+  // (original + sideband-wrapped). The runtime drains the stream over the wire.
   const MAX_SIDEBAND_DATA = 65515;
   const readable = new ReadableStream({
     start(controller) {
@@ -157,7 +158,7 @@ async function collectObjects(
         result.push(sha1);
         const { type, content } = obj;
 
-        if (type === 3) {
+        if (type === OBJ_COMMIT) {
           // Commit — parse tree and parent refs
           const text = decoder.decode(content);
           const lines = text.split("\n");
@@ -170,7 +171,7 @@ async function collectObjects(
               break;
             }
           }
-        } else if (type === 2) {
+        } else if (type === OBJ_TREE) {
           // Tree — parse entries: only walk subtrees, add blobs directly to result
           let pos = 0;
           while (pos < content.length) {
@@ -193,7 +194,7 @@ async function collectObjects(
               break;
             }
           }
-        } else if (type === 4) {
+        } else if (type === OBJ_TAG) {
           // Tag — parse object ref
           const text = decoder.decode(content);
           const objLine = text.split("\n").find((l) => l.startsWith("object "));

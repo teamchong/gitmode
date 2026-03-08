@@ -1,9 +1,10 @@
 // GitEngine — orchestrates R2 (objects) and DO SQLite (refs, metadata)
 //
 // Storage layout:
-//   R2 key:  "{repo}/objects/{sha1[0:2]}/{sha1[2:]}"  (loose objects)
+//   R2 key:  "{repo}/chunks/{uuid}"                    (~2MB bundled objects, primary)
+//   R2 key:  "{repo}/objects/{sha1[0:2]}/{sha1[2:]}"  (loose objects, legacy fallback)
 //   R2 key:  "{repo}/worktrees/{branch}/{filepath}"    (materialized files)
-//   SQLite:  refs, head, repo_meta, commits, permissions (per-repo DO)
+//   SQLite:  refs, head, repo_meta, commits, permissions, object_chunks, file_sizes
 
 import { WasmEngine } from "./wasm-engine";
 import { toHex } from "./hex";
@@ -47,7 +48,7 @@ export class GitEngine {
     return `${this.repo}/objects/${sha1Hex.slice(0, 2)}/${sha1Hex.slice(2)}`;
   }
 
-  async getObject(sha1Hex: string): Promise<Uint8Array | null> {
+  private async getObject(sha1Hex: string): Promise<Uint8Array | null> {
     // Check chunk index first (SQLite lookup, then R2 range read)
     if (this.sql) {
       const rows = [...this.sql.exec(
@@ -67,7 +68,7 @@ export class GitEngine {
     return new Uint8Array(await obj.arrayBuffer());
   }
 
-  async putObject(sha1Hex: string, data: Uint8Array): Promise<void> {
+  private async putObject(sha1Hex: string, data: Uint8Array): Promise<void> {
     await this.objects.put(this.objectKey(sha1Hex), data);
   }
 
@@ -112,7 +113,7 @@ export class GitEngine {
     return { sha1Hex, compressed };
   }
 
-  /** Batch write multiple objects to R2, bundled into ~4MB chunks with SQLite index. */
+  /** Batch write multiple objects to R2, bundled into ~2MB chunks with SQLite index. */
   async putObjects(entries: Array<{ sha1Hex: string; compressed: Uint8Array }>): Promise<void> {
     if (!this.sql || entries.length === 0) {
       // No DO context — fall back to individual puts
@@ -188,6 +189,9 @@ export class GitEngine {
   ): Promise<Map<string, { type: number; content: Uint8Array }>> {
     const result = new Map<string, { type: number; content: Uint8Array }>();
     if (shas.length === 0) return result;
+
+    // Ensure WASM is initialized before decompressObject calls in Phase 1
+    await this.getWasm();
 
     let remaining = shas;
 

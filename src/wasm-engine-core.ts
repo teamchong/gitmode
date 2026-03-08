@@ -187,7 +187,7 @@ export class WasmEngineCore {
     this.exports.resetHeap();
     const inPtr = this.writeBytes(compressed);
     const outPtr = this.exports.alloc(maxSize);
-    if (outPtr === 0) return new Uint8Array(0);
+    if (outPtr === 0) throw new Error(`WASM alloc failed: inflate output buffer (${maxSize} bytes)`);
     const written = this.exports.zlib_inflate(inPtr, compressed.length, outPtr, maxSize);
     return this.readBytes(outPtr, written);
   }
@@ -196,7 +196,9 @@ export class WasmEngineCore {
     this.exports.resetHeap();
     const inPtr = this.writeBytes(compressed);
     const outPtr = this.exports.alloc(maxSize);
+    if (outPtr === 0) throw new Error(`WASM alloc failed: inflate output buffer (${maxSize} bytes)`);
     const consumedPtr = this.exports.alloc(4);
+    if (consumedPtr === 0) throw new Error("WASM alloc failed: consumed tracking (4 bytes)");
     const written = this.exports.zlib_inflate_tracked(inPtr, compressed.length, outPtr, maxSize, consumedPtr);
     const consumed = new DataView(this.exports.memory.buffer).getUint32(consumedPtr, true);
     return { data: this.readBytes(outPtr, written), consumed };
