@@ -215,7 +215,7 @@ async function jsInflateTracked(
       resolve({ data, consumed: inflate.bytesWritten });
     });
     inflate.on("error", reject);
-    inflate.end(Buffer.from(input));
+    inflate.end(Buffer.from(input.buffer, input.byteOffset, input.byteLength));
   });
 
   return result;
@@ -223,10 +223,10 @@ async function jsInflateTracked(
 
 function readUint32BE(buf: Uint8Array, offset: number): number {
   return (
-    (buf[offset] << 24) |
+    ((buf[offset] << 24) |
     (buf[offset + 1] << 16) |
     (buf[offset + 2] << 8) |
-    buf[offset + 3]
+    buf[offset + 3]) >>> 0
   );
 }
 

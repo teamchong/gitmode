@@ -201,32 +201,44 @@ async function indexNewCommits(
   newSha: string,
 ): Promise<void> {
   const visited = new Set<string>();
-  const queue = [newSha];
+  let frontier = [newSha];
   const stopAt = oldSha === ZERO_SHA ? null : oldSha;
+  const MAX_COMMITS = 10000;
 
-  while (queue.length > 0) {
-    const sha = queue.shift()!;
-    if (visited.has(sha)) continue;
-    if (stopAt && sha === stopAt) continue;
-    visited.add(sha);
-
-    const obj = await engine.readObject(sha);
-    if (!obj) continue;
-
-    // Parse the commit to extract author/message/timestamp
-    const raw = decoder.decode(obj.content);
-    const authorLine = raw.match(/^author (.+?) <(.+?)> (\d+)/m);
-    const msgStart = raw.indexOf("\n\n");
-    const message = msgStart >= 0 ? raw.slice(msgStart + 2).trim() : "";
-    const author = authorLine ? `${authorLine[1]} <${authorLine[2]}>` : "unknown";
-    const timestamp = authorLine ? parseInt(authorLine[3], 10) : 0;
-
-    engine.indexCommit(sha, author, message, timestamp);
-
-    // Walk parents
-    const parentMatches = raw.matchAll(/^parent ([0-9a-f]{40})/gm);
-    for (const m of parentMatches) {
-      queue.push(m[1]);
+  while (frontier.length > 0 && visited.size < MAX_COMMITS) {
+    // Deduplicate frontier
+    const batch: string[] = [];
+    for (const sha of frontier) {
+      if (!visited.has(sha) && sha !== stopAt) {
+        visited.add(sha);
+        batch.push(sha);
+      }
     }
+    if (batch.length === 0) break;
+
+    // Batch read commits (up to 500 at a time)
+    const objects = await engine.readObjects(batch);
+    const nextFrontier: string[] = [];
+
+    for (const sha of batch) {
+      const obj = objects.get(sha);
+      if (!obj) continue;
+
+      const raw = decoder.decode(obj.content);
+      const authorLine = raw.match(/^author (.+?) <(.+?)> (\d+)/m);
+      const msgStart = raw.indexOf("\n\n");
+      const message = msgStart >= 0 ? raw.slice(msgStart + 2).trim() : "";
+      const author = authorLine ? `${authorLine[1]} <${authorLine[2]}>` : "unknown";
+      const timestamp = authorLine ? parseInt(authorLine[3], 10) : 0;
+
+      engine.indexCommit(sha, author, message, timestamp);
+
+      const parentMatches = raw.matchAll(/^parent ([0-9a-f]{40})/gm);
+      for (const m of parentMatches) {
+        nextFrontier.push(m[1]);
+      }
+    }
+
+    frontier = nextFrontier;
   }
 }

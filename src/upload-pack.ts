@@ -129,8 +129,9 @@ async function collectObjects(
   const visited = new Set<string>();
   const result: string[] = [];
   let frontier = wants.filter(s => !haves.has(s));
+  const MAX_OBJECTS = 500_000;
 
-  while (frontier.length > 0) {
+  while (frontier.length > 0 && visited.size < MAX_OBJECTS) {
     // Deduplicate frontier against visited
     const batch: string[] = [];
     for (const sha1 of frontier) {

@@ -113,7 +113,7 @@ Key optimizations:
 | Diff | Supported |
 | Blame (via libgit2) | Supported |
 | Commit history / log | Supported |
-| REST API (35+ endpoints) | Supported |
+| REST API (29 endpoints) | Supported |
 | SSH transport | Supported |
 | Server-side merge (ff + 3-way) | Supported |
 | Cherry-pick / revert / reset | Supported |

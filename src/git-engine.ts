@@ -231,7 +231,7 @@ export class GitEngine {
             const data = new Uint8Array(await obj.arrayBuffer());
             for (const e of byChunk.get(key)!) {
               const compressed = data.subarray(e.offset, e.offset + e.length);
-              const parsed = this.decompressObject(compressed);
+              const parsed = await this.decompressObject(compressed);
               if (parsed) result.set(e.sha, parsed);
             }
           }
@@ -259,23 +259,47 @@ export class GitEngine {
   }
 
   /** Decompress a raw git object (zlib compressed full object with header). */
-  private decompressObject(
+  private async decompressObject(
     compressed: Uint8Array
-  ): { type: number; content: Uint8Array } | null {
+  ): Promise<{ type: number; content: Uint8Array } | null> {
     let raw: Uint8Array | null = null;
 
     if (this.wasm) {
-      for (const multiplier of [4, 16, 64, 256]) {
-        const maxSize = Math.min(
-          Math.max(compressed.length * multiplier, 65536),
-          32 * 1024 * 1024
-        );
-        const result = this.wasm.zlibInflate(compressed, maxSize);
-        if (result.length > 0) { raw = result; break; }
+      try {
+        for (const multiplier of [4, 16, 64, 256]) {
+          const maxSize = Math.min(
+            Math.max(compressed.length * multiplier, 65536),
+            32 * 1024 * 1024
+          );
+          const result = this.wasm.zlibInflate(compressed, maxSize);
+          if (result.length > 0) { raw = result; break; }
+        }
+      } catch {
+        // WASM trap — fall through to node:zlib
       }
     }
 
-    if (!raw || raw.length === 0) return null;
+    if (!raw || raw.length === 0) {
+      try {
+        const { createInflate } = await import("node:zlib");
+        raw = await new Promise<Uint8Array>((resolve, reject) => {
+          const inflate = createInflate();
+          const chunks: Buffer[] = [];
+          inflate.on("data", (chunk: Buffer) => chunks.push(chunk));
+          inflate.on("end", () => {
+            const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+            const data = new Uint8Array(totalLen);
+            let pos = 0;
+            for (const c of chunks) { data.set(c, pos); pos += c.length; }
+            resolve(data);
+          });
+          inflate.on("error", reject);
+          inflate.end(Buffer.from(compressed.buffer, compressed.byteOffset, compressed.byteLength));
+        });
+      } catch {
+        return null;
+      }
+    }
 
     const spaceIdx = raw.indexOf(0x20);
     const nullIdx = raw.indexOf(0x00);
@@ -334,7 +358,7 @@ export class GitEngine {
           resolve(data);
         });
         inflate.on("error", reject);
-        inflate.end(Buffer.from(compressed));
+        inflate.end(Buffer.from(compressed.buffer, compressed.byteOffset, compressed.byteLength));
       });
     }
 
