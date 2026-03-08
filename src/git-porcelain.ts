@@ -447,23 +447,32 @@ export class GitPorcelain {
     if (!startSha) return [];
 
     const visited = new Set<string>();
-    const queue = [startSha];
+    let frontier = [startSha];
     const commits: CommitInfo[] = [];
 
-    while (queue.length > 0 && commits.length < maxCount) {
-      const sha = queue.shift()!;
-      if (visited.has(sha)) continue;
-      visited.add(sha);
+    while (frontier.length > 0 && commits.length < maxCount) {
+      const batch: string[] = [];
+      for (const sha of frontier) {
+        if (!visited.has(sha)) { visited.add(sha); batch.push(sha); }
+      }
+      if (batch.length === 0) break;
 
-      const obj = await this.engine.readObject(sha);
-      if (!obj || obj.type !== OBJ_COMMIT) continue;
-
-      const info = parseCommit(sha, obj.content);
-      commits.push(info);
-      queue.push(...info.parents);
+      const objects = await this.engine.readObjects(batch);
+      const nextFrontier: string[] = [];
+      for (const sha of batch) {
+        if (commits.length >= maxCount) break;
+        const obj = objects.get(sha);
+        if (!obj || obj.type !== OBJ_COMMIT) continue;
+        const info = parseCommit(sha, obj.content);
+        commits.push(info);
+        nextFrontier.push(...info.parents);
+      }
+      frontier = nextFrontier;
     }
 
-    return commits;
+    // Sort by timestamp descending (BFS order may not be chronological)
+    commits.sort((a, b) => b.authorTimestamp - a.authorTimestamp);
+    return commits.slice(0, maxCount);
   }
 
   // === diff ===
@@ -687,36 +696,58 @@ export class GitPorcelain {
     if (!startSha) return [];
 
     const visited = new Set<string>();
-    const queue = [startSha];
+    let frontier = [startSha];
     const commits: CommitInfo[] = [];
 
-    while (queue.length > 0 && commits.length < maxCount) {
-      const sha = queue.shift()!;
-      if (visited.has(sha)) continue;
-      visited.add(sha);
+    while (frontier.length > 0 && commits.length < maxCount) {
+      // Deduplicate frontier
+      const batch: string[] = [];
+      for (const sha of frontier) {
+        if (!visited.has(sha)) { visited.add(sha); batch.push(sha); }
+      }
+      if (batch.length === 0) break;
 
-      const obj = await this.engine.readObject(sha);
-      if (!obj || obj.type !== OBJ_COMMIT) continue;
+      // Batch-read all commits at this BFS level
+      const objects = await this.engine.readObjects(batch);
+      const infos: CommitInfo[] = [];
+      const parentShas = new Set<string>();
+      for (const sha of batch) {
+        const obj = objects.get(sha);
+        if (!obj || obj.type !== OBJ_COMMIT) continue;
+        const info = parseCommit(sha, obj.content);
+        infos.push(info);
+        if (info.parents.length > 0) parentShas.add(info.parents[0]);
+      }
 
-      const info = parseCommit(sha, obj.content);
+      // Batch-read parent commits (needed for tree comparison)
+      const missingParents = [...parentShas].filter(s => !objects.has(s));
+      const parentObjects = missingParents.length > 0
+        ? await this.engine.readObjects(missingParents)
+        : new Map<string, { type: number; content: Uint8Array }>();
+      // Merge into objects for unified lookup
+      for (const [k, v] of parentObjects) objects.set(k, v);
 
-      // Check if this commit changed the file relative to its first parent
-      const fileSha = await this.getFileShaInTree(info.tree, path);
-      let parentFileSha: string | null = null;
-      if (info.parents.length > 0) {
-        const parentObj = await this.engine.readObject(info.parents[0]);
-        if (parentObj && parentObj.type === OBJ_COMMIT) {
-          const parentInfo = parseCommit(info.parents[0], parentObj.content);
-          parentFileSha = await this.getFileShaInTree(parentInfo.tree, path);
+      const nextFrontier: string[] = [];
+      for (const info of infos) {
+        if (commits.length >= maxCount) break;
+
+        const fileSha = await this.getFileShaInTree(info.tree, path);
+        let parentFileSha: string | null = null;
+        if (info.parents.length > 0) {
+          const parentObj = objects.get(info.parents[0]);
+          if (parentObj && parentObj.type === OBJ_COMMIT) {
+            const parentInfo = parseCommit(info.parents[0], parentObj.content);
+            parentFileSha = await this.getFileShaInTree(parentInfo.tree, path);
+          }
         }
-      }
 
-      // Include if file was added, modified, or deleted in this commit
-      if (fileSha !== parentFileSha) {
-        commits.push(info);
-      }
+        if (fileSha !== parentFileSha) {
+          commits.push(info);
+        }
 
-      queue.push(...info.parents);
+        nextFrontier.push(...info.parents);
+      }
+      frontier = nextFrontier;
     }
 
     return commits;
