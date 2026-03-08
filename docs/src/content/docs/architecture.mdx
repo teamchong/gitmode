@@ -13,7 +13,7 @@ gitmode runs entirely on Cloudflare's edge infrastructure with four components:
 |-----------|------|
 | **Worker** | HTTP router — matches git protocol and REST API routes, forwards to Durable Object |
 | **RepoStore DO** | Per-repo Durable Object with embedded SQLite for refs, HEAD, metadata, commit index |
-| **R2** | Object storage for git objects (blobs, trees, commits, tags) as zlib-compressed loose objects |
+| **R2** | Object storage for git objects bundled into ~2MB chunks, plus materialized worktree files |
 | **SSH Proxy** | Node.js SSH-to-HTTP proxy for `git clone ssh://...` support (development only) |
 
 ## Request Flow
@@ -63,11 +63,29 @@ CREATE TABLE commits (
   message TEXT NOT NULL,
   timestamp INTEGER NOT NULL
 );
+
+-- Object chunk index (maps SHA → R2 chunk for batch reads)
+CREATE TABLE object_chunks (
+  sha TEXT PRIMARY KEY,
+  chunk_key TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  byte_length INTEGER NOT NULL
+);
+
+-- File size cache (avoids R2 reads for stats endpoint)
+CREATE TABLE file_sizes (
+  sha TEXT PRIMARY KEY,
+  size INTEGER NOT NULL
+);
 ```
 
 ### R2 Object Layout
 
-Git objects are stored at `{owner}/{repo}/objects/{sha[0:2]}/{sha[2:]}` (matching git's loose object layout) as zlib-compressed data with a type prefix byte:
+Git objects are bundled into ~2MB chunks stored at `{owner}/{repo}/chunks/{uuid}`. Each chunk contains multiple zlib-compressed objects concatenated together. The `object_chunks` SQLite table maps each SHA to its chunk key, byte offset, and byte length for efficient extraction via R2 range reads.
+
+Legacy loose objects (from before chunk storage) are stored at `{owner}/{repo}/objects/{sha[0:2]}/{sha[2:]}`. The engine falls back to loose object reads when an SHA is not found in the chunk index.
+
+Object types:
 
 | Type | Value | Description |
 |------|-------|-------------|
@@ -90,16 +108,16 @@ R2 objects are immutable (content-addressed by SHA-1), so they don't require coo
 
 1. Client sends ref update commands + packfile
 2. Worker routes to RepoStore DO (one per repo, strongly consistent)
-3. **Packfile unpack — Phase 1 (CPU-only):** Objects prepared in memory (SHA-1 hash + zlib compress)
-4. **Packfile unpack — Phase 2 (I/O):** Batch write to R2 with 50 concurrent PUTs
-5. Refs updated in DO SQLite
-6. Commits indexed in DO SQLite (author, message, timestamp)
-7. **Worktree materialization:**
+3. **Packfile unpack:** Objects hashed + zlib-compressed in memory, then flushed to R2 in ~2MB chunks (batched every 200 objects). Each chunk indexed in SQLite `object_chunks` table.
+4. Refs updated in DO SQLite
+5. Commits indexed in DO SQLite (author, message, timestamp)
+6. File sizes cached in DO SQLite for stats endpoint
+7. Report-status returned to client
+8. **Worktree materialization (async for >500 objects):**
    - Uses **optimistic object cache** — in-memory objects from unpack, zero R2 re-reads
    - **Incremental mode** (default): diffs old tree vs new tree, writes only changed/added files
-   - **Full mode** (first push): writes all files
-8. File sizes cached in DO SQLite for stats endpoint
-9. Report-status returned to client
+   - **Full mode** (first push): reads blobs in 500-object batches, writes with 100-concurrent R2 PUTs
+   - Yields between batches via `setTimeout(0)` so DO can serve concurrent requests
 
 See [Performance](/gitmode/performance/) for benchmark results and optimization details.
 

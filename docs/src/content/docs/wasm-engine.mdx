@@ -3,7 +3,12 @@ title: WASM Engine
 description: Zig-compiled WASM module for git binary operations.
 ---
 
-The core binary operations (SHA-1, zlib, packfiles, deltas) run in a Zig-compiled WASM module with SIMD acceleration. The optimized binary is 791KB after dead-code elimination and size optimization.
+The core binary operations (SHA-1, zlib via libdeflate, packfiles, deltas) run in Zig-compiled WASM modules with SIMD128 acceleration. Two modules are available:
+
+| Module | Size | Use case |
+|--------|------|----------|
+| **Server** (`gitmode.wasm`) | 865KB | Full git server — all operations including libgit2 |
+| **Core** (`gitmode-core.wasm`) | 83KB | Client-side — SHA-1, zlib, delta only (no packfile/libgit2) |
 
 ## Build Pipeline
 
@@ -11,13 +16,15 @@ The core binary operations (SHA-1, zlib, packfiles, deltas) run in a Zig-compile
 Zig 0.15 (ReleaseSmall)
   → wasm-metadce (remove unused exports)
   → wasm-opt -Oz (size optimization)
-  → 791KB final binary
+  → 865KB server / 83KB core
 ```
 
-Build command:
+Build commands:
 
 ```bash
-pnpm run build:wasm
+pnpm run build:wasm       # Server module only
+pnpm run build:wasm-core  # Core module only
+pnpm run build:wasm-all   # Both modules
 ```
 
 ## Exports
@@ -103,7 +110,7 @@ The WASM module exports 28 functions organized by category:
 
 ## Size Optimization
 
-The WASM binary was reduced from 1.2MB to 791KB (34% reduction) using:
+The server WASM binary is 865KB after optimization:
 
 1. **wasm-metadce** — Dead code elimination based on an export graph. Only 28 exports are kept; all unreachable functions are removed. This reduced function count from ~3000+ to 1272.
 
@@ -117,8 +124,17 @@ Both tools require feature flags for the WASM features used:
 
 ## Zig Source
 
-The WASM source lives in `wasm/` and is built with `zig build wasm -Doptimize=ReleaseSmall`. Key build settings:
+The WASM source lives in `wasm/` with two build targets:
+
+- `zig build wasm` — server module (`main.zig`, includes libgit2)
+- `zig build core` — core module (`main_core.zig`, SHA-1/zlib/delta only)
+
+Key build settings:
 
 - `entry = .disabled` — no `_start` entry point (library mode)
 - `rdynamic = true` — export all public functions (required in Zig 0.15)
 - `stack_size = 4MB` — sufficient for deep tree recursion and large packfiles
+
+### Zlib via libdeflate
+
+Zlib operations use vendored [libdeflate 1.25](https://github.com/ebiggers/libdeflate) (`wasm/vendor/libdeflate/`), imported via Zig's `@cImport`. This replaced Zig's `std.compress.flate` which crashed on certain inputs. libdeflate is purpose-built for in-memory inflate/deflate and consistently faster than general-purpose zlib implementations.

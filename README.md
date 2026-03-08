@@ -4,7 +4,7 @@
 
 Git server running entirely on Cloudflare Workers. No VMs, no servers — just Workers + R2 + Durable Objects.
 
-The git protocol engine is written in Zig, compiled to WASM with SIMD128 acceleration for SHA-1 hashing, delta compression, and packfile operations. libgit2 is statically linked for advanced operations (diff, blame, revwalk).
+The git protocol engine is written in Zig, compiled to WASM with SIMD128 acceleration for SHA-1 hashing, zlib (via libdeflate), delta compression, and packfile operations. libgit2 is statically linked for advanced operations (diff, blame, revwalk).
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/teamchong/gitmode)
 
@@ -51,7 +51,8 @@ git push -u origin main
 
 | Data | Storage | Why |
 |------|---------|-----|
-| Git objects (blobs, trees, commits) | R2 | Unlimited size, $0.015/GB/mo, content-addressed |
+| Git objects (blobs, trees, commits) | R2 | Bundled into ~2MB chunks, indexed via SQLite for O(1) lookups |
+| Object chunk index | DO SQLite | Maps SHA → chunk key + byte offset for range reads |
 | Worktree files (materialized on push) | R2 | Direct file access for UI, edge-cached |
 | Refs (branches, tags, HEAD) | DO SQLite | Strongly consistent, co-located with ref update logic |
 | Metadata (repos, commits, permissions) | DO SQLite | SQL queries, no cross-service latency |
@@ -75,24 +76,29 @@ Git's hot paths are CPU-bound binary operations — SHA-1 hashing, zlib decompre
 - **SHA-1**: Every object read/write hashes. SIMD-accelerated rounds.
 - **Delta compression**: SIMD memcmp for finding copy regions in base objects.
 - **Packfile parsing**: Binary protocol with varint encoding — Zig's type system maps 1:1.
-- **Memory**: Fixed 32MB arena allocator. No GC pauses during large pushes.
+- **Zlib**: Vendored libdeflate 1.25 — faster than Zig's std.compress.flate.
+- **Memory**: Fixed 64MB arena allocator. No GC pauses during large pushes.
 
 ## Performance
 
-Benchmarked on localhost dev server with batch R2 writes, incremental worktree updates, optimistic object cache, and SQLite file size caching:
+Benchmarked on localhost dev server (wrangler dev) with R2 chunk storage, batch reads, streaming clone, and async worktree materialization:
 
-| Operation | Small (3 files) | Medium (50 files) | Large (500 files) |
+| Metric | 100 files (796K) | 1K files (7.8MB) | 5K files (39MB) |
 |---|---|---|---|
-| Initial push | 283ms | 183ms | 52ms (was 972ms) |
-| Incremental push | 85ms | 192ms | 12ms (was 827ms) |
-| Clone | 95ms | 152ms | 372ms |
-| Fetch | 98ms | 153ms | 340ms |
+| **Push** | 182ms | 585ms | 3.4s |
+| **Clone** | 107ms | 686ms | 3.1s |
+| **Incremental push** | 130ms | 372ms | 867ms |
+| **Stats API** | 67ms | 186ms | 447ms |
+| **Files API** | 65ms | 190ms | 435ms |
 
 Key optimizations:
-- **Batch R2 writes**: Objects prepared in CPU (hash+compress), then flushed to R2 in parallel batches of 50
+- **R2 chunk storage**: Objects bundled into ~2MB R2 values with SQLite index — reduces 10K individual R2 ops to ~50 chunk reads
+- **Batch readObjects**: Groups SHAs by chunk key, fetches each chunk once, extracts all objects
+- **Streaming clone**: ReadableStream for sideband-wrapped packfile — 1x memory vs 3x buffered
+- **Async worktree**: Large pushes (>500 objects) defer worktree materialization via `ctx.waitUntil()`, yielding between batches
+- **SQLite-first lookups**: `hasObject()` checks chunk index before R2 HEAD — no round trip
 - **Incremental worktree**: Diffs old tree vs new tree, only writes changed/added files
-- **Optimistic object cache**: Worktree materialization uses in-memory objects from packfile unpack, eliminating all R2 re-reads
-- **SQLite file size cache**: Stats endpoint reads cached sizes instead of fetching blobs from R2
+- **Optimistic object cache**: Worktree uses in-memory objects from packfile unpack, zero R2 re-reads
 
 ## Git features
 
@@ -104,9 +110,9 @@ Key optimizations:
 | Branches and tags | Supported |
 | Delta compression (ofs-delta, ref-delta) | Supported |
 | Packfile v2 | Supported |
-| Diff (via libgit2) | Supported |
+| Diff | Supported |
 | Blame (via libgit2) | Supported |
-| Commit history / revwalk (via libgit2) | Supported |
+| Commit history / log | Supported |
 | REST API (35+ endpoints) | Supported |
 | SSH transport | Supported |
 | Server-side merge (ff + 3-way) | Supported |
@@ -137,6 +143,15 @@ pnpm run dev
 pnpm run deploy
 ```
 
+## npm exports
+
+Two tree-shakeable entry points for use as a library:
+
+```ts
+import { WasmEngine } from "gitmode/server";  // Full engine (865KB WASM) — server-side git ops
+import { WasmEngine } from "gitmode/client";  // Core engine (83KB WASM) — SHA-1, zlib, delta only
+```
+
 ## Project structure
 
 ```
@@ -144,45 +159,44 @@ gitmode/
 ├── wasm/                    Zig WASM engine
 │   ├── build.zig            wasm32-wasi + SIMD128
 │   └── src/
-│       ├── main.zig         Exported WASM functions
-│       ├── sha1.zig         SHA-1 implementation
+│       ├── main.zig         Server WASM exports (865KB)
+│       ├── main_core.zig    Client WASM exports (83KB)
+│       ├── sha1.zig         SHA-1 (SIMD-accelerated)
 │       ├── object.zig       Git object format
 │       ├── pack.zig         Packfile v2
 │       ├── delta.zig        Delta compression
-│       ├── zlib.zig         Inflate/deflate
+│       ├── zlib.zig         Inflate/deflate via libdeflate
 │       ├── protocol.zig     pkt-line framing
 │       ├── simd.zig         SIMD128 memory ops
 │       └── libgit2.zig      libgit2 bindings (diff, blame, revwalk)
+│   └── vendor/libdeflate/   Vendored libdeflate 1.25
 ├── wasm/libgit2-wasm/       libgit2 compiled to WASM
-│   ├── build.sh             Cross-compile with zig cc
-│   ├── posix_shim.c         POSIX → R2 host imports
-│   └── wasm_platform.c      WASM platform layer
 ├── deps/libgit2/            libgit2 source (submodule)
 ├── src/
-│   ├── worker.ts            Worker entry point
-│   ├── git-engine.ts        R2 + DO SQLite orchestration
+│   ├── server.ts            Server entry point (full WASM)
+│   ├── client.ts            Client entry point (core WASM)
+│   ├── git-engine.ts        R2 + DO SQLite orchestration (chunk storage, batch reads)
 │   ├── git-porcelain.ts     High-level git ops (merge, cherry-pick, stats)
-│   ├── wasm-engine.ts       Typed WASM wrapper
-│   ├── wasm-module.ts       WASM module loader
+│   ├── wasm-engine.ts       Typed WASM wrapper (server)
+│   ├── wasm-engine-core.ts  Typed WASM wrapper (client)
 │   ├── repo-store.ts        Durable Object (per-repo SQLite)
-│   ├── upload-pack.ts       Clone/fetch handler
-│   ├── receive-pack.ts      Push handler + commit indexing
-│   ├── checkout.ts          Worktree materialization (incremental + optimistic)
+│   ├── upload-pack.ts       Clone/fetch handler (streaming response)
+│   ├── receive-pack.ts      Push handler + commit indexing + async worktree
+│   ├── checkout.ts          Worktree materialization (incremental + batched)
 │   ├── info-refs.ts         Ref advertisement
-│   ├── packfile-builder.ts  Assemble packfiles for clone/fetch
-│   ├── packfile-reader.ts   Unpack received packfiles (batch R2 writes)
+│   ├── packfile-builder.ts  Assemble packfiles (500-SHA batches, chunk concat)
+│   ├── packfile-reader.ts   Unpack received packfiles (streaming R2 flushes)
 │   ├── pkt-line.ts          Git pkt-line protocol framing
 │   ├── ssh-handler.ts       SSH command parser
-│   ├── env.ts               Env type (R2 + DO bindings)
-│   └── schema.sql           DO SQLite schema reference
+│   └── hex.ts               Fast hex encoding (lookup table)
+├── worker/                  Cloudflare Worker entry
 ├── app/                     vinext UI (React Server Components)
-│   ├── layout.tsx           Root layout
-│   ├── page.tsx             Landing / repo discovery
-│   └── [owner]/[repo]/      Repo pages (overview, tree, blob, commits, etc.)
 ├── test/
 │   ├── gitmode.test.ts      Integration tests (87 tests)
+│   ├── stress.sh            Stress test (100–10K files)
+│   ├── conformance.sh       Git protocol conformance (31 tests)
 │   └── bench.sh             Performance benchmarks
-├── research/                Dogfood reports and user interviews
+├── docs/                    Astro Starlight documentation
 ├── wrangler.jsonc           Cloudflare bindings
 └── package.json
 ```
