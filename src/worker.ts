@@ -131,15 +131,24 @@ export default {
 };
 
 async function listRepos(env: Env, ownerFilter?: string): Promise<Response> {
-  // Discover repos by listing R2 prefixes: {owner}/{repo}/objects/
+  // Discover repos via both legacy loose objects (/objects/) and chunk storage (/chunks/)
   const prefix = ownerFilter ? `${ownerFilter}/` : "";
-  const listed = await env.OBJECTS.list({ prefix, delimiter: "/objects/" });
+  const [byObjects, byChunks] = await Promise.all([
+    env.OBJECTS.list({ prefix, delimiter: "/objects/" }),
+    env.OBJECTS.list({ prefix, delimiter: "/chunks/" }),
+  ]);
   const repos: Array<{ owner: string; name: string }> = [];
   const seen = new Set<string>();
 
-  for (const prefix of listed.delimitedPrefixes) {
-    // prefix looks like "owner/repo/objects/"
-    const repoPath = prefix.replace(/\/objects\/$/, "");
+  for (const p of byObjects.delimitedPrefixes) {
+    const repoPath = p.replace(/\/objects\/$/, "");
+    if (seen.has(repoPath)) continue;
+    seen.add(repoPath);
+    const [owner, name] = repoPath.split("/");
+    if (owner && name) repos.push({ owner, name });
+  }
+  for (const p of byChunks.delimitedPrefixes) {
+    const repoPath = p.replace(/\/chunks\/$/, "");
     if (seen.has(repoPath)) continue;
     seen.add(repoPath);
     const [owner, name] = repoPath.split("/");

@@ -22,6 +22,7 @@
   },
   "files": [
     "src/**/*.ts",
+    "!src/worker.ts",
     "src/wasm/*.wasm",
     "bin/gitmode.mjs",
     "bin/template/"
