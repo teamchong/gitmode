@@ -189,6 +189,7 @@ export class WasmEngineCore {
     const outPtr = this.exports.alloc(maxSize);
     if (outPtr === 0) throw new Error(`WASM alloc failed: inflate output buffer (${maxSize} bytes)`);
     const written = this.exports.zlib_inflate(inPtr, compressed.length, outPtr, maxSize);
+    if (written === 0) throw new Error("Zlib inflate failed");
     return this.readBytes(outPtr, written);
   }
 
@@ -211,6 +212,7 @@ export class WasmEngineCore {
     const outCap = data.length + maxBlocks * 5 + 6 + 64;
     const outPtr = this.exports.alloc(outCap);
     const written = this.exports.zlib_deflate(inPtr, data.length, outPtr, outCap);
+    if (written === 0) throw new Error("Zlib deflate failed");
     return this.readBytes(outPtr, written);
   }
 

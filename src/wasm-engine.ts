@@ -375,6 +375,7 @@ export class WasmEngine {
       outPtr,
       maxSize
     );
+    if (written === 0) throw new Error("Zlib inflate failed");
     return this.readBytes(outPtr, written);
   }
 
@@ -409,6 +410,7 @@ export class WasmEngine {
       outPtr,
       outCap
     );
+    if (written === 0) throw new Error("Zlib deflate failed");
     return this.readBytes(outPtr, written);
   }
 

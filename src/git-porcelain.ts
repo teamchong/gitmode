@@ -134,6 +134,10 @@ function concatBytes(...arrays: Uint8Array[]): Uint8Array {
 function parseCommit(sha: string, content: Uint8Array): CommitInfo {
   const text = decoder.decode(content);
   const headerEnd = text.indexOf("\n\n");
+  if (headerEnd === -1) {
+    // Malformed commit — treat entire text as headers, empty message
+    return { sha, tree: "", parents: [], author: "", authorEmail: "", authorTimestamp: 0, committer: "", committerEmail: "", committerTimestamp: 0, message: "" };
+  }
   const headers = text.slice(0, headerEnd).split("\n");
   const message = text.slice(headerEnd + 2);
 
