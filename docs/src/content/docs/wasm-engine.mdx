@@ -1,14 +1,16 @@
 ---
 title: WASM Engine
-description: Zig-compiled WASM module for git binary operations.
+description: Zig-compiled WASM modules for git binary operations — server and client.
 ---
 
-The core binary operations (SHA-1, zlib via libdeflate, packfiles, deltas) run in Zig-compiled WASM modules with SIMD128 acceleration. Two modules are available:
+The core binary operations (SHA-1, zlib via libdeflate, packfiles, deltas) run in Zig-compiled WASM modules with SIMD128 acceleration. Two modules serve different use cases:
 
-| Module | Size | Use case |
-|--------|------|----------|
-| **Server** (`gitmode.wasm`) | 865KB | Full git server — all operations including libgit2 |
-| **Core** (`gitmode-core.wasm`) | 83KB | Client-side — SHA-1, zlib, delta only (no packfile/libgit2) |
+| Module | npm Entry | Size | Use case |
+|--------|-----------|------|----------|
+| **Server** (`gitmode.wasm`) | `import { WasmEngine } from "gitmode/server"` | 865KB | Full git server — all operations including libgit2 |
+| **Client** (`gitmode-core.wasm`) | `import { WasmEngineCore } from "gitmode/client"` | 83KB | Lightweight client — SHA-1, zlib, delta only (no packfile/libgit2) |
+
+The **server** module is used internally by `createHandler()` / `RepoStore` — you don't import it directly unless building custom server logic. The **client** module is standalone and runs anywhere WASM runs (browsers, Node.js, Workers, Deno).
 
 ## Build Pipeline
 

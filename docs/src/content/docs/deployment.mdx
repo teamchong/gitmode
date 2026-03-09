@@ -7,11 +7,37 @@ description: Deploy gitmode to Cloudflare Workers.
 
 - Cloudflare account with Workers Paid plan (for Durable Objects)
 - R2 bucket for git object storage
-- Wrangler CLI (`pnpm add -g wrangler`)
+
+## Option A: Deploy via npm Package (recommended)
+
+No WASM build needed — pre-built binaries are included in the package.
+
+```bash
+npx gitmode init     # Scaffolds worker/index.ts + wrangler.jsonc
+npm install
+npx gitmode deploy   # Deploys to Cloudflare Workers
+```
+
+The scaffolded `wrangler.jsonc` includes all required bindings (R2 bucket, Durable Objects, WASM rules).
+
+## Option B: Deploy from Source
+
+For contributors or custom builds. Requires Zig 0.15+, Binaryen, and pnpm.
+
+```bash
+# Build libgit2 for WASM (first time only)
+bash wasm/libgit2-wasm/build.sh
+
+# Build WASM (if not already built)
+pnpm run build:wasm
+
+# Deploy to Cloudflare
+wrangler deploy
+```
 
 ## Wrangler Configuration
 
-Your `wrangler.jsonc` should include:
+Whether scaffolded via `npx gitmode init` or written manually, your `wrangler.jsonc` needs:
 
 ```jsonc
 {
@@ -34,8 +60,7 @@ Your `wrangler.jsonc` should include:
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_classes": ["RepoLock"] },
-    { "tag": "v2", "deleted_classes": ["RepoLock"], "new_sqlite_classes": ["RepoStore"] }
+    { "tag": "v1", "new_sqlite_classes": ["RepoStore"] }
   ],
   "rules": [
     {
@@ -45,19 +70,6 @@ Your `wrangler.jsonc` should include:
     }
   ]
 }
-```
-
-## Deploy
-
-```bash
-# Build libgit2 for WASM (first time only)
-bash wasm/libgit2-wasm/build.sh
-
-# Build WASM (if not already built)
-pnpm run build:wasm
-
-# Deploy to Cloudflare
-wrangler deploy
 ```
 
 ## Create R2 Bucket

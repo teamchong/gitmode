@@ -1,9 +1,9 @@
 ---
 title: gitmode
-description: Serverless git hosting on Cloudflare Workers with Zig WASM engine.
+description: Git server & client as npm package for Cloudflare Workers with Zig WASM engine.
 template: splash
 hero:
-  tagline: Full git server on Cloudflare Workers. Push, clone, branch, merge — all serverless with zero infrastructure.
+  tagline: Git server & client for Cloudflare Workers. Push, clone, branch, merge — all serverless. Install as npm package or import into your Worker.
   actions:
     - text: Get Started
       link: /gitmode/getting-started/
@@ -16,22 +16,66 @@ hero:
 
 import { Card, CardGrid } from "@astrojs/starlight/components";
 
+## Two Modules, Two Use Cases
+
+gitmode ships as an npm package with two entry points for different use cases:
+
+<CardGrid>
+  <Card title="Server — gitmode/server" icon="setting">
+    Full git server for Cloudflare Workers. Smart HTTP transport, 29-endpoint REST API, R2 chunk storage, Durable Objects with SQLite. Uses the **865KB WASM** module with libgit2.
+
+    ```ts
+    import { createHandler, RepoStore } from "gitmode";
+    ```
+  </Card>
+  <Card title="Client — gitmode/client" icon="rocket">
+    Lightweight git primitives for any JS runtime. SHA-1 hashing, zlib compression, delta encoding. Uses the **83KB WASM** module — no server deps, no libgit2.
+
+    ```ts
+    import { WasmEngineCore } from "gitmode/client";
+    ```
+  </Card>
+</CardGrid>
+
 ## Features
 
 <CardGrid>
+  <Card title="npm Package" icon="seti:npm">
+    `npx gitmode init` scaffolds a complete Worker project. Or `import` directly into your existing Worker for git protocol + REST API routing.
+  </Card>
   <Card title="Full Git Protocol" icon="pencil">
     Smart HTTP transport and SSH-to-HTTP proxy. Works with standard `git clone`, `git push`, `git fetch` over both HTTP and SSH.
   </Card>
   <Card title="REST API" icon="setting">
     29 endpoints for programmatic access. Init repos, commit files, create branches, merge, cherry-pick, revert — all via JSON.
   </Card>
-  <Card title="Zig WASM Engine" icon="rocket">
-    SHA-1 hashing, zlib compression, packfile parsing, delta encoding — all in Zig compiled to WASM with SIMD acceleration.
+  <Card title="Zig WASM + SIMD128" icon="rocket">
+    SHA-1, zlib, packfile parsing, delta encoding — all in Zig compiled to WASM with SIMD acceleration. Two modules: 865KB server, 83KB client.
   </Card>
   <Card title="Durable Objects + R2" icon="puzzle">
     Each repo is a Durable Object with embedded SQLite for refs and metadata. Git objects bundled into ~2MB R2 chunks, indexed via SQLite for O(1) lookups.
   </Card>
+  <Card title="Security Hardened" icon="approve-check">
+    Path traversal protection, git refname validation, packfile size limits, varint bounds checks, input validation on all REST endpoints.
+  </Card>
 </CardGrid>
+
+## Quick Start
+
+```bash
+# Scaffold a new gitmode Worker
+npx gitmode init
+npm install
+npx gitmode deploy
+```
+
+Or add to an existing Worker:
+
+```ts
+import { RepoStore, createHandler } from "gitmode";
+export { RepoStore };
+export default { fetch: createHandler() };
+```
 
 ## How It Works
 

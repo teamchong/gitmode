@@ -7,13 +7,14 @@ description: How gitmode works under the hood.
 
 ![Architecture](/gitmode/img/architecture.svg)
 
-gitmode runs entirely on Cloudflare's edge infrastructure with four components:
+gitmode is an npm package (`import { createHandler } from "gitmode"`) that runs on Cloudflare's edge infrastructure with four components:
 
 | Component | Role |
 |-----------|------|
-| **Worker** | HTTP router — matches git protocol and REST API routes, forwards to Durable Object |
+| **Worker** | HTTP router via `createHandler()` — matches git protocol and REST API routes, forwards to Durable Object |
 | **RepoStore DO** | Per-repo Durable Object with embedded SQLite for refs, HEAD, metadata, commit index |
 | **R2** | Object storage for git objects bundled into ~2MB chunks, plus materialized worktree files |
+| **Zig WASM** | Two modules: **server** (865KB, full git + libgit2) and **client** (83KB, SHA-1/zlib/delta only) |
 | **SSH Proxy** | Node.js SSH-to-HTTP proxy for `git clone ssh://...` support (development only) |
 
 ## Request Flow

@@ -3,7 +3,64 @@ title: Getting Started
 description: Set up and deploy gitmode.
 ---
 
-## Prerequisites
+## Option A: Use as npm Package (recommended)
+
+The fastest way to deploy a gitmode server. No WASM build needed — the pre-built binaries are included.
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) 22+
+- A [Cloudflare](https://cloudflare.com) account with Workers, R2, and Durable Objects
+
+### Scaffold and Deploy
+
+```bash
+npx gitmode init     # Creates worker/index.ts + wrangler.jsonc
+npm install
+npx gitmode deploy   # Deploys to Cloudflare Workers
+```
+
+### Import into an Existing Worker
+
+```ts
+import { RepoStore, createHandler } from "gitmode";
+export { RepoStore };
+
+// Minimal — all git protocol + REST API routes handled automatically
+export default { fetch: createHandler() };
+```
+
+With custom auth:
+
+```ts
+import { RepoStore, createHandler } from "gitmode";
+export { RepoStore };
+const gitmode = createHandler();
+export default {
+  fetch(req, env) {
+    if (!authorize(req)) return new Response("Unauthorized", { status: 401 });
+    return gitmode(req, env);
+  }
+};
+```
+
+### Client-Only Usage
+
+For client-side git primitives (SHA-1, zlib, delta) without any server dependencies:
+
+```ts
+import { WasmEngineCore } from "gitmode/client";
+const engine = await WasmEngineCore.create();
+// Use engine.sha1Hash(), engine.zlibInflate(), etc.
+```
+
+---
+
+## Option B: Clone and Develop
+
+For contributing or customizing gitmode itself.
+
+### Prerequisites
 
 - [Node.js](https://nodejs.org/) 22+
 - [pnpm](https://pnpm.io/installation)
@@ -11,7 +68,7 @@ description: Set up and deploy gitmode.
 - [Binaryen](https://github.com/WebAssembly/binaryen) (`wasm-opt`, `wasm-metadce`)
 - A [Cloudflare](https://cloudflare.com) account with Workers, R2, and Durable Objects
 
-## Setup
+### Setup
 
 ```bash
 git clone https://github.com/teamchong/gitmode.git
@@ -19,7 +76,7 @@ cd gitmode
 pnpm install
 ```
 
-## Build WASM
+### Build WASM
 
 The Zig WASM module provides SHA-1, zlib, packfile parsing, and delta encoding. **You must build the WASM module before running the dev server or tests.**
 
@@ -29,7 +86,7 @@ pnpm run build:wasm
 
 This compiles the Zig code, runs `wasm-metadce` to remove unused exports, and optimizes with `wasm-opt -Oz`.
 
-## Development
+### Development
 
 Start a local dev server:
 
