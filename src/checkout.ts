@@ -176,7 +176,7 @@ async function walkTree(
     const spaceIdx = data.indexOf(0x20, offset);
     if (spaceIdx === -1) break;
     const nullIdx = data.indexOf(0x00, spaceIdx + 1);
-    if (nullIdx === -1) break;
+    if (nullIdx === -1 || nullIdx + 21 > data.length) break;
 
     const mode = decoder.decode(data.subarray(offset, spaceIdx));
     const name = decoder.decode(data.subarray(spaceIdx + 1, nullIdx));

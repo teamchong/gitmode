@@ -72,7 +72,7 @@ function parseTreeEntries(content: Uint8Array): Array<{ mode: string; name: stri
     if (spaceIdx === -1) break;
     const mode = decoder.decode(content.subarray(pos, spaceIdx));
     const nullIdx = content.indexOf(0x00, spaceIdx + 1);
-    if (nullIdx === -1) break;
+    if (nullIdx === -1 || nullIdx + 21 > content.length) break;
     const name = decoder.decode(content.subarray(spaceIdx + 1, nullIdx));
     const shaBytes = content.subarray(nullIdx + 1, nullIdx + 21);
     const sha = toHex(shaBytes);
