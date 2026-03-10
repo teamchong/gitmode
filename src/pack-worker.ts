@@ -14,6 +14,7 @@ import { objectToPackType, writeTypeSizeHeader, typeSizeHeaderLen } from "./pack
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 
 const decoder = new TextDecoder();
+const MAX_OBJECTS_PER_BATCH = 1000;
 
 interface ObjectDescriptor {
   sha: string;
@@ -52,11 +53,28 @@ export class PackWorkerDO extends DurableObject<Env> {
     }
 
     const body = await request.json() as BuildRequest;
-    const { objects } = body;
+    const { repoPath, objects } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
     if (!objects || objects.length === 0) {
       return new Response(new Uint8Array(0), {
         headers: { "content-type": "application/octet-stream", "x-object-count": "0" },
       });
+    }
+    if (objects.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many objects\n", { status: 400 });
+    }
+
+    // Validate all R2 keys are scoped to this repo (prevent cross-repo reads)
+    const repoPrefix = repoPath + "/";
+    for (const desc of objects) {
+      if (desc.chunkKey && !desc.chunkKey.startsWith(repoPrefix)) {
+        return new Response("Invalid chunk key scope\n", { status: 400 });
+      }
+      if (desc.looseKey && !desc.looseKey.startsWith(repoPrefix)) {
+        return new Response("Invalid object key scope\n", { status: 400 });
+      }
     }
 
     const wasm = await this.getWasm();

@@ -67,12 +67,6 @@ CREATE TABLE commits (
   timestamp INTEGER NOT NULL
 );
 
--- Access control
-CREATE TABLE permissions (
-  username TEXT PRIMARY KEY,
-  role TEXT NOT NULL           -- e.g. "admin", "write", "read"
-);
-
 -- Object chunk index (maps SHA → R2 chunk for batch reads)
 CREATE TABLE object_chunks (
   sha TEXT PRIMARY KEY,

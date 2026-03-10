@@ -2,7 +2,7 @@
 //
 // Each repository gets its own DO instance. The DO's embedded SQLite
 // database stores refs (branches, tags, HEAD) and metadata (repo info,
-// commit index, permissions). Git objects live in R2.
+// commit index). Git objects live in R2.
 //
 // This replaces the previous KV (refs) + D1 (metadata) + RepoLock (mutex)
 // architecture with a single strongly-consistent DO per repo.
@@ -23,7 +23,7 @@ const MAX_DESCRIPTION_LEN = 10 * 1024; // 10KB
 const MAX_SHORT_FIELD_LEN = 1024; // 1KB (author, email, tagger)
 const INVALID_REF_CHARS = /[\x00-\x1f\x7f ~^:?*\[\\]/;
 
-function validateRefName(name: string): void {
+export function validateRefName(name: string): void {
   if (!name || typeof name !== "string") throw new Error("Ref name is required");
   if (name.length > MAX_REF_NAME_LEN) throw new Error("Ref name too long");
   if (INVALID_REF_CHARS.test(name)) throw new Error("Ref name contains invalid characters");
@@ -107,12 +107,8 @@ export class RepoStore extends DurableObject<Env> {
         timestamp INTEGER NOT NULL
       )
     `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS permissions (
-        username TEXT PRIMARY KEY,
-        role TEXT NOT NULL
-      )
-    `);
+    // Note: authentication/authorization is the caller's responsibility.
+    // Use createHandler() with a custom auth wrapper — see docs.
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS file_sizes (
         sha TEXT PRIMARY KEY,
@@ -238,8 +234,10 @@ export class RepoStore extends DurableObject<Env> {
         try {
           return await handleApiAction(porcelain, engine, apiAction, request, url);
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          return Response.json({ error: message }, { status: 400 });
+          const raw = err instanceof Error ? err.message : String(err);
+          // Only return known user-facing errors; hide internal details
+          const safe = /^(Missing|Invalid|Ref|Branch|Tag|Merge|No |Not |Cannot )/.test(raw) ? raw : "Operation failed";
+          return Response.json({ error: safe }, { status: 400 });
         }
       }
 

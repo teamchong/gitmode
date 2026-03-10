@@ -13,6 +13,7 @@ import type { Env } from "./env";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
 import { unpackPackfile, type ObjectCache } from "./packfile-reader";
 import { materializeWorktree } from "./checkout";
+import { validateRefName } from "./repo-store";
 
 const decoder = new TextDecoder();
 const ZERO_SHA = "0".repeat(40);
@@ -94,10 +95,18 @@ export async function handleReceivePack(
       if (updates.length >= 1000) {
         return { response: errorResponse("Too many ref updates (max 1000)", useSideband) };
       }
+      const refname = line.slice(82);
+      // Validate ref name (strip refs/ prefix for validation)
+      const shortRef = refname.replace(/^refs\//, "");
+      try {
+        validateRefName(shortRef);
+      } catch {
+        return { response: errorResponse(`Invalid ref name: ${refname}`, useSideband) };
+      }
       updates.push({
         oldSha: line.slice(0, 40),
         newSha: line.slice(41, 81),
-        refname: line.slice(82),
+        refname,
       });
     }
   }
@@ -142,7 +151,7 @@ export async function handleReceivePack(
         results.push(`ok ${update.refname}`);
       }
     } catch (err) {
-      results.push(`ng ${update.refname} ${err}`);
+      results.push(`ng ${update.refname} failed`);
     }
   }
 

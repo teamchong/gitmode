@@ -191,17 +191,21 @@ async function buildPackfileFanout(
     })
   );
 
-  // Gather segments, log failures
+  // Gather segments — fail if any batch was rejected (don't produce incomplete packfiles)
   const segments: Uint8Array[] = [];
   let objectCount = 0;
+  const failures: string[] = [];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === "fulfilled") {
       segments.push(r.value.segment);
       objectCount += r.value.count;
     } else {
-      console.error(`PackWorkerDO batch ${i} failed: ${r.reason}`);
+      failures.push(`batch ${i}: ${r.reason}`);
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`PackWorkerDO fan-out failed: ${failures.join("; ")}`);
   }
 
   // Assemble final packfile: header + segments + SHA-1 trailer

@@ -19,9 +19,5 @@ const gitmode = createHandler({
 });
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    // Expose env to RSC components via globalThis
-    (globalThis as any).__gitmode_env__ = env;
-    return gitmode(request, env);
-  },
+  fetch: gitmode,
 };

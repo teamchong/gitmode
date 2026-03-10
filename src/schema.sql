@@ -37,8 +37,5 @@ CREATE TABLE IF NOT EXISTS commits (
 CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author);
 
--- Access permissions
-CREATE TABLE IF NOT EXISTS permissions (
-  username TEXT PRIMARY KEY,
-  role TEXT NOT NULL CHECK (role IN ('read', 'write', 'admin'))
-);
+-- Note: authentication/authorization is the caller's responsibility.
+-- Use createHandler() with a custom auth wrapper — see docs.

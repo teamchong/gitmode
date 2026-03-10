@@ -1444,12 +1444,11 @@ describe("REST API", () => {
   it("PATCH / updates repo metadata", async () => {
     const resp = await apiJson("", {
       method: "PATCH",
-      body: JSON.stringify({ description: "My test repo", visibility: "private" }),
+      body: JSON.stringify({ description: "My test repo" }),
     });
     expect(resp.ok).toBe(true);
     const meta = await apiJson("");
     expect(meta.description).toBe("My test repo");
-    expect(meta.visibility).toBe("private");
   });
 });
 

@@ -4,7 +4,7 @@
 //   R2 key:  "{repo}/chunks/{uuid}"                    (~2MB bundled objects, primary)
 //   R2 key:  "{repo}/objects/{sha1[0:2]}/{sha1[2:]}"  (loose objects, legacy fallback)
 //   R2 key:  "{repo}/worktrees/{branch}/{filepath}"    (materialized files)
-//   SQLite:  refs, head, repo_meta, commits, permissions, object_chunks, file_sizes
+//   SQLite:  refs, head, repo_meta, commits, object_chunks, file_sizes
 
 import { WasmEngine } from "./wasm-engine";
 import { toHex } from "./hex";
@@ -437,7 +437,8 @@ export class GitEngine {
 
   updateRepoMeta(fields: Record<string, string>): void {
     const sql = this.requireSql();
-    const allowed = ["description", "visibility", "default_branch"];
+    // Note: visibility is stored but NOT enforced — auth is the caller's responsibility
+    const allowed = ["description", "default_branch"];
     const sets: string[] = [];
     const values: string[] = [];
     for (const [key, val] of Object.entries(fields)) {

@@ -49,6 +49,14 @@ const GIT_ROUTE = /^\/([^/]+)\/([^/]+?)\.git\/(.+)$/;
 const API_ROUTE = /^\/api\/repos\/([^/]+)\/([^/]+)(?:\/(.*))?$/;
 const LIST_REPOS_ROUTE = /^\/api\/repos(?:\/([^/]+))?\/?$/;
 
+const VALID_PATH_SEGMENT = /^[a-zA-Z0-9._][a-zA-Z0-9._-]*$/;
+const RESERVED_NAMES = /^\.\.?$/;
+
+function isValidOwnerRepo(owner: string, repo: string): boolean {
+  return VALID_PATH_SEGMENT.test(owner) && VALID_PATH_SEGMENT.test(repo)
+    && !RESERVED_NAMES.test(owner) && !RESERVED_NAMES.test(repo);
+}
+
 function getStore(env: Env, repoPath: string) {
   const id = env.REPO_STORE.idFromName(repoPath);
   return env.REPO_STORE.get(id);
@@ -101,6 +109,9 @@ export default {
     const apiMatch = path.match(API_ROUTE);
     if (apiMatch) {
       const [, owner, repo, rest = ""] = apiMatch;
+      if (!isValidOwnerRepo(owner, repo)) {
+        return withCors(Response.json({ error: "Invalid repository path" }, { status: 400 }));
+      }
       const repoPath = `${owner}/${repo}`;
       const store = getStore(env, repoPath);
 
@@ -116,6 +127,9 @@ export default {
     const gitMatch = path.match(GIT_ROUTE);
     if (gitMatch) {
       const [, owner, repo, action] = gitMatch;
+      if (!isValidOwnerRepo(owner, repo)) {
+        return new Response("Invalid repository path\n", { status: 400 });
+      }
       const repoPath = `${owner}/${repo}`;
       const store = getStore(env, repoPath);
 
