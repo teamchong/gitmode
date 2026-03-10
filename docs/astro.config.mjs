@@ -23,6 +23,7 @@ export default defineConfig({
         { label: "SSH Transport", slug: "ssh-transport" },
         { label: "WASM Engine", slug: "wasm-engine" },
         { label: "Performance", slug: "performance" },
+        { label: "Scaling", slug: "scaling" },
         { label: "Deployment", slug: "deployment" },
       ],
     }),

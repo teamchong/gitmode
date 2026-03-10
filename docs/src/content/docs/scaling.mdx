@@ -1,0 +1,157 @@
+---
+title: Scaling
+description: How gitmode scales beyond single-DO limits using fan-out patterns.
+---
+
+## Architecture Strengths
+
+gitmode's foundation — R2 for object storage, Durable Objects with SQLite for per-repo coordination — provides several inherent advantages:
+
+| Property | How |
+|----------|-----|
+| **Zero-ops global deployment** | Cloudflare Workers run in 300+ edge locations. No servers to manage. |
+| **Per-repo isolation** | Each repo gets its own DO with SQLite. A hot repo can't affect others. No shared database contention. |
+| **Zero egress costs** | R2 charges $0 for egress (S3 charges ~$0.09/GB). For git hosting, egress is the #1 cost — R2 eliminates it. |
+| **No binary dependencies** | Zig WASM engine is fully portable. No libgit2 system install, no JVM. Deploy is `wrangler deploy`. |
+| **Content-addressed storage** | Git objects in R2 are immutable (keyed by SHA-1), so they don't require coordination. Only refs need consistency. |
+
+## Current Limits
+
+A single Durable Object has hard limits imposed by the Cloudflare platform:
+
+| Resource | Limit |
+|----------|-------|
+| Memory | ~128MB per DO instance |
+| CPU | 30 seconds per request |
+| SQLite | 10GB per DO |
+| R2 object size | 5TB |
+
+For most repositories (up to ~1-5GB of source code), a single RepoStore DO handles all operations comfortably. The current benchmarks demonstrate this:
+
+| Workload | 100 files (796K) | 1K files (7.8MB) | 5K files (39MB) |
+|----------|-----------------|------------------|-----------------|
+| Push | 182ms | 585ms | 3.4s |
+| Clone | 107ms | 686ms | 3.1s |
+
+The memory ceiling becomes relevant when building packfiles for very large repositories (~10K+ objects of incompressible data), where all compressed objects must be assembled in memory.
+
+## Fan-Out Pattern
+
+The per-DO memory limit is not an architectural limit — it's a per-instance limit that can be overcome by distributing work across multiple DOs. This is a proven pattern on Cloudflare Workers.
+
+### How it works
+
+Instead of one DO doing all the work, the orchestrator DO fans out to a pool of worker DOs, each handling a bounded subset:
+
+```
+Client ← Worker ← RepoStore (orchestrator)
+                      ├── PackWorkerDO slot-0  (objects 0-499)
+                      ├── PackWorkerDO slot-1  (objects 500-999)
+                      ├── PackWorkerDO slot-2  (objects 1000-1499)
+                      └── ...
+```
+
+### Scatter-gather for packfile assembly
+
+The most memory-intensive operation is building a packfile for clone/fetch. With fan-out:
+
+1. **RepoStore** performs the BFS tree walk to collect object SHAs (lightweight — just SHAs, no decompression)
+2. Splits the SHA list into chunks, fans out to a **PackWorkerDO pool**
+3. Each PackWorkerDO reads its objects from R2, compresses them, returns a packfile segment
+4. RepoStore streams segments back to the client with sideband framing
+5. SHA-1 trailer computed incrementally as segments arrive
+
+Each PackWorkerDO handles ~500-1K objects, staying well under the 128MB limit. The pool size scales with the repository — a 50K-object repo fans out to ~50-100 workers.
+
+### Worker DO pool design
+
+Worker DOs use deterministic naming for instance reuse:
+
+```typescript
+// Fixed pool — DOs hibernate when idle (zero cost)
+const slotId = env.PACK_WORKER.idFromName(`pack-${region}-slot-${slotIndex}`);
+const worker = env.PACK_WORKER.get(slotId);
+const result = await worker.fetch(scanRequest);
+```
+
+| Property | Value |
+|----------|-------|
+| Pool size | 100 slots per datacenter |
+| Naming | `pack-{region}-slot-{0..99}` |
+| Idle cost | $0 (hibernated DOs are free) |
+| Reuse | Same slots across requests (warm WASM, warm caches) |
+| Fallback | If all slots busy, process locally in batches |
+
+### Which operations benefit
+
+| Operation | Fan-out? | Why |
+|-----------|----------|-----|
+| **Clone/fetch** (packfile build) | Yes | Memory-intensive: read + compress + assemble all objects |
+| **Push** (packfile unpack) | No | Already streams with 200-object flush batches |
+| **Diff / merge** (tree walks) | Optional | BFS walks are lightweight; fan out only for very deep trees |
+| **Log / stats** | No | SQLite queries, no large buffers |
+| **Worktree materialization** | Optional | Already uses `ctx.waitUntil()` with batched R2 PUTs |
+
+### Coordination
+
+Results from worker DOs are merged in the orchestrator:
+
+```typescript
+// Fan out to worker pool
+const groups = chunkArray(objectShas, OBJECTS_PER_WORKER);
+const results = await Promise.allSettled(
+  groups.map((shas, i) => {
+    const worker = env.PACK_WORKER.get(
+      env.PACK_WORKER.idFromName(`pack-${region}-slot-${i % POOL_SIZE}`)
+    );
+    return worker.buildSegment(shas);
+  })
+);
+
+// Stream successful segments to client
+for (const result of results) {
+  if (result.status === "fulfilled") {
+    controller.enqueue(wrapSideband(result.value));
+  }
+}
+```
+
+`Promise.allSettled` provides fault tolerance — if a worker DO fails, the orchestrator can retry that batch or fall back to local processing.
+
+## Comparison with Other Architectures
+
+| | **gitmode (R2 + DO)** | **Gitea (disk + PostgreSQL)** | **GitHub (custom)** |
+|---|---|---|---|
+| Deployment | `wrangler deploy` | Docker + PostgreSQL | N/A (SaaS) |
+| Global latency | Edge-native (300+ POPs) | Single region | Edge CDN |
+| Max repo size | Unbounded with fan-out | Disk-limited | 5GB soft limit |
+| Concurrent reads | Fan out across DO pool | Single process | Replicated |
+| Concurrent writes | Serialized per repo (DO) | Parallel (DB row locks) | Parallel (Spokes) |
+| Storage cost | $0.015/GB, $0 egress | Disk cost | Included |
+| Memory per operation | 128MB per DO (fan out for more) | Process memory (GBs) | Process memory |
+| Garbage collection | Not yet (planned) | `git gc` built-in | Automatic |
+| Operational burden | Zero | Medium | N/A |
+
+### Key tradeoffs
+
+**gitmode is strongest when:**
+- You need global edge latency without managing infrastructure
+- Egress costs matter (hosting many public repos, CI cloning frequently)
+- Per-repo isolation is important (multi-tenant platforms)
+- You want a programmatic REST API alongside git protocol
+
+**Traditional git servers are stronger when:**
+- Single-region deployment is acceptable
+- You need concurrent writes to the same repo at high throughput
+- Repos contain very large binary assets (>5GB)
+- You need built-in garbage collection and repacking
+
+## Cost at Scale
+
+| Scale | R2 Storage | R2 Operations | DO Compute | Total/month |
+|-------|-----------|---------------|------------|-------------|
+| 100 repos, 100MB avg | $0.15 | ~$0.05 | ~$0.10 | ~$0.30 |
+| 1K repos, 500MB avg | $7.50 | ~$2.00 | ~$5.00 | ~$15 |
+| 10K repos, 1GB avg | $150 | ~$50 | ~$100 | ~$300 |
+
+These estimates assume moderate activity (10 pushes + 50 clones per repo per month). The zero-egress property means costs scale with storage and writes, not reads — the opposite of S3-backed solutions.
