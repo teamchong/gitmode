@@ -16,13 +16,15 @@
   // Durable Objects: per-repo SQLite for refs, metadata, permissions
   "durable_objects": {
     "bindings": [
-      { "name": "REPO_STORE", "class_name": "RepoStore" }
+      { "name": "REPO_STORE", "class_name": "RepoStore" },
+      { "name": "PACK_WORKER", "class_name": "PackWorkerDO" }
     ]
   },
 
   "migrations": [
     { "tag": "v1", "new_classes": ["RepoLock"] },
-    { "tag": "v2", "deleted_classes": ["RepoLock"], "new_sqlite_classes": ["RepoStore"] }
+    { "tag": "v2", "deleted_classes": ["RepoLock"], "new_sqlite_classes": ["RepoStore"] },
+    { "tag": "v3", "new_classes": ["PackWorkerDO"] }
   ],
 
   // WASM module

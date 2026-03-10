@@ -22,7 +22,8 @@ const decoder = new TextDecoder();
 
 export async function handleUploadPack(
   engine: GitEngine,
-  body: Uint8Array
+  body: Uint8Array,
+  packWorker?: DurableObjectNamespace
 ): Promise<Response> {
   // Parse wants and haves from client request
   const wants: string[] = [];
@@ -80,7 +81,7 @@ export async function handleUploadPack(
   const needed = await collectObjects(engine, wants, haves);
 
   // Build packfile — reads objects in batches to bound memory
-  const packData = await buildPackfile(engine, needed);
+  const packData = await buildPackfile(engine, needed, packWorker);
 
   // Response: ACK (if common commits found) or NAK + packfile in sideband-64k
   const ackOrNak = commonSha

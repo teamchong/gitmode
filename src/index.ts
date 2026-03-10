@@ -16,6 +16,7 @@
 //   };
 
 export { RepoStore } from "./repo-store";
+export { PackWorkerDO } from "./pack-worker";
 export { GitEngine, OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 export { GitPorcelain } from "./git-porcelain";
 export { WasmEngine } from "./wasm-engine";

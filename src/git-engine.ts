@@ -84,6 +84,54 @@ export class GitEngine {
     return head !== null;
   }
 
+  /** Look up chunk metadata for a batch of SHAs (for fan-out to PackWorkerDO). */
+  lookupChunkMeta(shas: string[]): Array<{
+    sha: string;
+    chunkKey?: string;
+    offset?: number;
+    length?: number;
+    looseKey?: string;
+  }> {
+    if (!this.sql) {
+      return shas.map(sha => ({ sha, looseKey: this.objectKey(sha) }));
+    }
+
+    const result: Array<{
+      sha: string;
+      chunkKey?: string;
+      offset?: number;
+      length?: number;
+      looseKey?: string;
+    }> = [];
+
+    // Batch query SQLite in groups of 100 (DO bind variable limit)
+    for (let i = 0; i < shas.length; i += 100) {
+      const batch = shas.slice(i, i + 100);
+      const params = batch.map(() => "?").join(",");
+      const rows = [...this.sql.exec(
+        `SELECT sha, chunk_key, byte_offset, byte_length FROM object_chunks WHERE sha IN (${params})`,
+        ...batch
+      )];
+      const found = new Map(rows.map(r => [r.sha as string, r]));
+      for (const sha of batch) {
+        const row = found.get(sha);
+        if (row) {
+          result.push({
+            sha,
+            chunkKey: row.chunk_key as string,
+            offset: row.byte_offset as number,
+            length: row.byte_length as number,
+          });
+        } else {
+          result.push({ sha, looseKey: this.objectKey(sha) });
+        }
+      }
+    }
+    return result;
+  }
+
+  get repoPath(): string { return this.repo; }
+
   /** Store a git object (type + content), returns sha1 hex. */
   async storeObject(
     type: number,

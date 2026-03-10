@@ -41,7 +41,7 @@ The per-DO memory limit is not an architectural limit — it's a per-instance li
 
 ### How it works
 
-Instead of one DO doing all the work, the orchestrator DO fans out to a pool of worker DOs, each handling a bounded subset:
+Instead of one DO doing all the work, the RepoStore fans out to a pool of **PackWorkerDO** instances, each handling a bounded subset of objects:
 
 ```
 Client ← Worker ← RepoStore (orchestrator)
@@ -51,36 +51,45 @@ Client ← Worker ← RepoStore (orchestrator)
                       └── ...
 ```
 
+Fan-out activates automatically when:
+- The `PACK_WORKER` binding is configured in `wrangler.jsonc`
+- The object count exceeds 200 (below this, local assembly is faster)
+
+When `PACK_WORKER` is not configured, everything falls back to local assembly — fully backward compatible.
+
 ### Scatter-gather for packfile assembly
 
 The most memory-intensive operation is building a packfile for clone/fetch. With fan-out:
 
 1. **RepoStore** performs the BFS tree walk to collect object SHAs (lightweight — just SHAs, no decompression)
-2. Splits the SHA list into chunks, fans out to a **PackWorkerDO pool**
-3. Each PackWorkerDO reads its objects from R2, compresses them, returns a packfile segment
-4. RepoStore streams segments back to the client with sideband framing
-5. SHA-1 trailer computed incrementally as segments arrive
+2. **`lookupChunkMeta()`** queries SQLite to map each SHA to its R2 chunk key, byte offset, and byte length
+3. SHAs are split into batches of 500 and assigned round-robin to the **PackWorkerDO pool** (max 20 slots)
+4. Each PackWorkerDO receives object descriptors (SHA + R2 location), reads from R2 (10-concurrent fetches), decompresses, re-compresses for packfile format, and returns a binary segment
+5. RepoStore gathers segments via `Promise.allSettled`, assembles the final packfile (PACK header + segments + SHA-1 trailer)
+6. Response wraps the packfile in sideband-64k framing
 
-Each PackWorkerDO handles ~500-1K objects, staying well under the 128MB limit. The pool size scales with the repository — a 50K-object repo fans out to ~50-100 workers.
+Each PackWorkerDO handles ~500 objects, staying well under the 128MB limit. `Promise.allSettled` provides fault tolerance — failed batches are logged but don't crash the entire clone.
 
 ### Worker DO pool design
 
-Worker DOs use deterministic naming for instance reuse:
+Worker DOs use deterministic naming (`idFromName`) for instance reuse:
 
 ```typescript
 // Fixed pool — DOs hibernate when idle (zero cost)
-const slotId = env.PACK_WORKER.idFromName(`pack-${region}-slot-${slotIndex}`);
-const worker = env.PACK_WORKER.get(slotId);
-const result = await worker.fetch(scanRequest);
+const id = packWorker.idFromName(`pack-slot-${slotIndex}`);
+const worker = packWorker.get(id);
+const resp = await worker.fetch(buildRequest);
 ```
 
 | Property | Value |
 |----------|-------|
-| Pool size | 100 slots per datacenter |
-| Naming | `pack-{region}-slot-{0..99}` |
+| Pool size | 20 slots (configurable via `FANOUT_POOL_SIZE`) |
+| Batch size | 500 objects per worker (configurable via `FANOUT_BATCH_SIZE`) |
+| Threshold | 200 objects minimum to activate fan-out |
+| Naming | `pack-slot-{0..19}` |
 | Idle cost | $0 (hibernated DOs are free) |
-| Reuse | Same slots across requests (warm WASM, warm caches) |
-| Fallback | If all slots busy, process locally in batches |
+| Reuse | Same slots across requests (warm WASM, warm R2 connections) |
+| Fallback | When `PACK_WORKER` binding is absent, local assembly |
 
 ### Which operations benefit
 
@@ -94,29 +103,24 @@ const result = await worker.fetch(scanRequest);
 
 ### Coordination
 
-Results from worker DOs are merged in the orchestrator:
+The `buildPackfile` function in `src/packfile-builder.ts` handles the decision automatically:
 
 ```typescript
-// Fan out to worker pool
-const groups = chunkArray(objectShas, OBJECTS_PER_WORKER);
-const results = await Promise.allSettled(
-  groups.map((shas, i) => {
-    const worker = env.PACK_WORKER.get(
-      env.PACK_WORKER.idFromName(`pack-${region}-slot-${i % POOL_SIZE}`)
-    );
-    return worker.buildSegment(shas);
-  })
-);
-
-// Stream successful segments to client
-for (const result of results) {
-  if (result.status === "fulfilled") {
-    controller.enqueue(wrapSideband(result.value));
+export async function buildPackfile(
+  engine: GitEngine,
+  objectShas: string[],
+  packWorker?: DurableObjectNamespace
+): Promise<Uint8Array> {
+  // Fan out only when binding exists AND enough objects to justify it
+  if (packWorker && objectShas.length > FANOUT_THRESHOLD) {
+    return buildPackfileFanout(engine, objectShas, packWorker);
   }
+  // Otherwise: local assembly (fast for small repos)
+  // ...
 }
 ```
 
-`Promise.allSettled` provides fault tolerance — if a worker DO fails, the orchestrator can retry that batch or fall back to local processing.
+Fan-out coordination uses `Promise.allSettled` for fault tolerance — if a worker DO fails, the batch is logged but doesn't crash the clone. Failed objects are simply missing from the response (git client will retry).
 
 ## Comparison with Other Architectures
 

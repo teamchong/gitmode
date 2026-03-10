@@ -6,4 +6,5 @@
 export interface Env {
   OBJECTS: R2Bucket;
   REPO_STORE: DurableObjectNamespace;
+  PACK_WORKER?: DurableObjectNamespace;
 }

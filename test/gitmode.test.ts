@@ -1454,6 +1454,98 @@ describe("REST API", () => {
 });
 
 // ============================================================
+// PackWorkerDO fan-out packfile assembly
+// ============================================================
+describe("Fan-out packfile assembly", () => {
+  it("should build a valid packfile via PackWorkerDO fan-out", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+    const { unpackPackfile } = await import("../src/packfile-reader");
+    const repoName = "fanout/test";
+
+    // Create enough objects to exceed FANOUT_THRESHOLD (200)
+    const engine = new GitEngine(env.OBJECTS, repoName);
+    const shas: string[] = [];
+    const treeEntries: Uint8Array[] = [];
+
+    // Create 250 blobs + tree entries to trigger fan-out
+    for (let i = 0; i < 250; i++) {
+      const content = encoder.encode(`file ${i} content for fan-out test\n`);
+      const sha = await engine.storeObject(OBJ_BLOB, content);
+      shas.push(sha);
+      treeEntries.push(buildTreeEntry("100644", `file-${i}.txt`, hexToBytes(sha)));
+    }
+
+    // Create a tree referencing all blobs
+    const treeContent = concatBytes(...treeEntries);
+    const treeSha = await engine.storeObject(OBJ_TREE, treeContent);
+    shas.push(treeSha);
+
+    // Create a commit
+    const commitText = `tree ${treeSha}\nauthor Fan <f@f.com> 1700000000 +0000\ncommitter Fan <f@f.com> 1700000000 +0000\n\nfan-out test\n`;
+    const commitSha = await engine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+    shas.push(commitSha);
+
+    // Build packfile WITH fan-out (env.PACK_WORKER is configured in test/wrangler.jsonc)
+    const packData = await buildPackfile(engine, shas, env.PACK_WORKER);
+
+    // Verify it's a valid packfile
+    expect(packData[0]).toBe(0x50); // 'P'
+    expect(packData[1]).toBe(0x41); // 'A'
+    expect(packData[2]).toBe(0x43); // 'C'
+    expect(packData[3]).toBe(0x4b); // 'K'
+
+    // Version 2
+    const version = (packData[4] << 24) | (packData[5] << 16) | (packData[6] << 8) | packData[7];
+    expect(version).toBe(2);
+
+    // Object count should be 252 (250 blobs + 1 tree + 1 commit)
+    const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+    expect(count).toBe(252);
+
+    // Unpack into a fresh engine and verify objects round-trip correctly
+    const verifyEngine = new GitEngine(env.OBJECTS, "fanout/verify");
+    await unpackPackfile(verifyEngine, packData);
+
+    // Verify a sample blob survived the round-trip
+    const blob0 = await verifyEngine.readObject(shas[0]);
+    expect(blob0).not.toBeNull();
+    expect(blob0!.type).toBe(OBJ_BLOB);
+    expect(decoder.decode(blob0!.content)).toBe("file 0 content for fan-out test\n");
+
+    // Verify the commit survived
+    const commit = await verifyEngine.readObject(commitSha);
+    expect(commit).not.toBeNull();
+    expect(commit!.type).toBe(OBJ_COMMIT);
+    expect(decoder.decode(commit!.content)).toContain("fan-out test");
+
+    // Verify the tree survived
+    const tree = await verifyEngine.readObject(treeSha);
+    expect(tree).not.toBeNull();
+    expect(tree!.type).toBe(OBJ_TREE);
+  });
+
+  it("should fall back to local assembly when below threshold", async () => {
+    const { buildPackfile } = await import("../src/packfile-builder");
+    const repoName = "fanout/small";
+    const engine = new GitEngine(env.OBJECTS, repoName);
+
+    // Create just 3 objects (well below threshold of 200)
+    const blobSha = await engine.storeObject(OBJ_BLOB, encoder.encode("small test\n"));
+    const treeContent = buildTreeEntry("100644", "file.txt", hexToBytes(blobSha));
+    const treeSha = await engine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor S <s@s.com> 1700000000 +0000\ncommitter S <s@s.com> 1700000000 +0000\n\nsmall\n`;
+    const commitSha = await engine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+
+    // Build with PACK_WORKER available but below threshold — should use local path
+    const packData = await buildPackfile(engine, [commitSha, treeSha, blobSha], env.PACK_WORKER);
+
+    // Should still produce a valid 3-object packfile
+    const count = (packData[8] << 24) | (packData[9] << 16) | (packData[10] << 8) | packData[11];
+    expect(count).toBe(3);
+  });
+});
+
+// ============================================================
 // Helpers
 // ============================================================
 

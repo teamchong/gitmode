@@ -146,7 +146,7 @@ export class RepoStore extends DurableObject<Env> {
 
       case "upload-pack": {
         const body = new Uint8Array(await request.arrayBuffer());
-        return handleUploadPack(engine, body);
+        return handleUploadPack(engine, body, this.env.PACK_WORKER);
       }
 
       case "receive-pack": {

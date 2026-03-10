@@ -40,8 +40,9 @@
 
 import type { Env } from "./env";
 import { RepoStore } from "./repo-store";
+import { PackWorkerDO } from "./pack-worker";
 
-export { RepoStore };
+export { RepoStore, PackWorkerDO };
 export type { Env };
 
 const GIT_ROUTE = /^\/([^/]+)\/([^/]+?)\.git\/(.+)$/;
