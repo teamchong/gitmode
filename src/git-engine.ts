@@ -348,7 +348,8 @@ export class GitEngine {
           inflate.on("error", reject);
           inflate.end(Buffer.from(compressed.buffer, compressed.byteOffset, compressed.byteLength));
         });
-      } catch {
+      } catch (err) {
+        console.error(`readObject: node:zlib inflate failed for ${sha} (${compressed.length} bytes): ${err}`);
         return null;
       }
     }

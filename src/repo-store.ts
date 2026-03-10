@@ -25,6 +25,10 @@ const MAX_FILES_PER_COMMIT = 10_000;
 const MAX_API_BODY = 10 * 1024 * 1024; // 10MB
 const INVALID_REF_CHARS = /[\x00-\x1f\x7f ~^:?*\[\\]/;
 
+function bufferToBase64(data: Uint8Array): string {
+  return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("base64");
+}
+
 export function validateRefName(name: string): void {
   if (!name || typeof name !== "string") throw new Error("Ref name is required");
   if (name.length > MAX_REF_NAME_LEN) throw new Error("Ref name too long");
@@ -287,8 +291,11 @@ async function handleApiAction(
       const path = url.searchParams.get("path") ?? "";
       const content = await porcelain.catFile(ref, path);
       if (!content) return Response.json({ error: "not found" }, { status: 404 });
-      const text = decoder.decode(content);
-      return Response.json({ content: text, size: content.length });
+      const isBinary = content.subarray(0, 8192).includes(0x00);
+      if (isBinary) {
+        return Response.json({ content: bufferToBase64(content), size: content.length, encoding: "base64" });
+      }
+      return Response.json({ content: decoder.decode(content), size: content.length });
     }
 
     case "list-files": {
@@ -567,11 +574,20 @@ async function handleApiAction(
       const obj = await engine.readObject(resolved);
       if (!obj) return Response.json({ error: "not found" }, { status: 404 });
       const typeNames = ["", "blob", "tree", "commit", "tag"];
-      return Response.json({
-        type: typeNames[obj.type] ?? "unknown",
+      const typeName = typeNames[obj.type] ?? "unknown";
+      // Blobs may be binary — detect via null bytes in first 8KB
+      const isBinary = typeName === "blob" && obj.content.subarray(0, 8192).includes(0x00);
+      const result: Record<string, unknown> = {
+        type: typeName,
         size: obj.content.length,
-        content: decoder.decode(obj.content),
-      });
+      };
+      if (isBinary) {
+        result.encoding = "base64";
+        result.content = bufferToBase64(obj.content);
+      } else {
+        result.content = decoder.decode(obj.content);
+      }
+      return Response.json(result);
     }
 
     default:

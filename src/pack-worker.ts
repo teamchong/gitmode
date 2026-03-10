@@ -176,7 +176,12 @@ export class PackWorkerDO extends DurableObject<Env> {
         raw = wasm.zlibInflate(compressed, maxSize);
         if (raw.length > 0) break;
         raw = null;
-      } catch { raw = null; }
+      } catch (err) {
+        raw = null;
+        if (mult === sizes[sizes.length - 1]) {
+          console.error(`pack-worker: inflate failed after all attempts (${compressed.length} bytes): ${err}`);
+        }
+      }
     }
     if (!raw || raw.length === 0) return null;
 
@@ -195,7 +200,10 @@ export class PackWorkerDO extends DurableObject<Env> {
     let packCompressed: Uint8Array;
     try {
       packCompressed = wasm.zlibDeflate(content);
-    } catch { return null; }
+    } catch (err) {
+      console.error(`pack-worker: deflate failed (${content.length} bytes): ${err}`);
+      return null;
+    }
     if (packCompressed.length === 0) return null;
 
     // Build packfile entry: type/size header + compressed content
