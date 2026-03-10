@@ -1,11 +1,14 @@
-// PackWorkerDO — fan-out worker for parallel packfile assembly
+// PackWorkerDO — general-purpose compute worker for fan-out operations
 //
-// Receives a batch of object descriptors (SHA + R2 location),
-// reads and decompresses each from R2, re-compresses for packfile
-// format, and returns the assembled packfile segment.
+// Each instance is a compute unit with its own ~128MB memory budget,
+// WASM engine, and R2 access. The coordinator (RepoStore) dispatches
+// work to a pool of these workers via RPC.
 //
-// Used by RepoStore to distribute packfile building across a pool
-// of workers, keeping each under the DO memory limit (~128MB).
+// Actions:
+//   build-segment   — decompress git objects, re-compress for packfile format
+//   write-worktree  — read blobs from R2, write raw content to worktree paths
+//
+// Pool slots use deterministic IDs ("slot-{N}") for warm reuse.
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
@@ -29,6 +32,20 @@ interface BuildRequest {
   objects: ObjectDescriptor[];
 }
 
+interface WorktreeEntry {
+  blobSha: string;
+  r2Key: string;
+  chunkKey?: string;
+  offset?: number;
+  length?: number;
+  looseKey?: string;
+}
+
+interface WorktreeRequest {
+  repoPath: string;
+  entries: WorktreeEntry[];
+}
+
 function nameToType(name: string): number {
   switch (name) {
     case "blob": return OBJ_BLOB;
@@ -48,10 +65,21 @@ export class PackWorkerDO extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("x-action") !== "build-segment") {
-      return new Response("Unknown action\n", { status: 400 });
-    }
+    const action = request.headers.get("x-action");
 
+    switch (action) {
+      case "build-segment":
+        return this.handleBuildSegment(request);
+      case "write-worktree":
+        return this.handleWriteWorktree(request);
+      default:
+        return new Response("Unknown action\n", { status: 400 });
+    }
+  }
+
+  // === build-segment: decompress + re-compress objects for packfile ===
+
+  private async handleBuildSegment(request: Request): Promise<Response> {
     const body = await request.json() as BuildRequest;
     const { repoPath, objects } = body;
     if (!repoPath || typeof repoPath !== "string") {
@@ -67,49 +95,18 @@ export class PackWorkerDO extends DurableObject<Env> {
     }
 
     // Validate all R2 keys are scoped to this repo (prevent cross-repo reads)
-    const repoPrefix = repoPath + "/";
-    for (const desc of objects) {
-      if (desc.chunkKey && !desc.chunkKey.startsWith(repoPrefix)) {
-        return new Response("Invalid chunk key scope\n", { status: 400 });
-      }
-      if (desc.looseKey && !desc.looseKey.startsWith(repoPrefix)) {
-        return new Response("Invalid object key scope\n", { status: 400 });
-      }
+    if (!this.validateKeyScope(repoPath, objects)) {
+      return new Response("Invalid key scope\n", { status: 400 });
     }
 
     const wasm = await this.getWasm();
     const r2 = this.env.OBJECTS;
 
     // Group objects by chunk key for efficient R2 reads
-    const byChunk = new Map<string, ObjectDescriptor[]>();
-    const loose: ObjectDescriptor[] = [];
-    for (const desc of objects) {
-      if (desc.chunkKey) {
-        let list = byChunk.get(desc.chunkKey);
-        if (!list) { list = []; byChunk.set(desc.chunkKey, list); }
-        list.push(desc);
-      } else {
-        loose.push(desc);
-      }
-    }
+    const { byChunk, loose } = groupByChunk(objects);
 
     // Fetch chunks (10 concurrent)
-    const chunkData = new Map<string, Uint8Array>();
-    const chunkKeys = [...byChunk.keys()];
-    const CONCURRENCY = 10;
-    for (let i = 0; i < chunkKeys.length; i += CONCURRENCY) {
-      const batch = chunkKeys.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(async key => {
-          const obj = await r2.get(key);
-          if (!obj) return { key, data: null };
-          return { key, data: new Uint8Array(await obj.arrayBuffer()) };
-        })
-      );
-      for (const { key, data } of results) {
-        if (data) chunkData.set(key, data);
-      }
-    }
+    const chunkData = await this.fetchChunks(r2, [...byChunk.keys()]);
 
     // Build packfile entries
     const entries: Uint8Array[] = [];
@@ -123,12 +120,13 @@ export class PackWorkerDO extends DurableObject<Env> {
       for (const desc of descs) {
         if (desc.offset === undefined || desc.length === undefined) continue;
         const compressed = data.subarray(desc.offset, desc.offset + desc.length);
-        const entry = this.buildEntry(wasm, compressed);
+        const entry = this.buildPackEntry(wasm, compressed);
         if (entry) { entries.push(entry); objectCount++; }
       }
     }
 
     // Process loose objects
+    const CONCURRENCY = 10;
     for (let i = 0; i < loose.length; i += CONCURRENCY) {
       const batch = loose.slice(i, i + CONCURRENCY);
       const results = await Promise.all(
@@ -141,7 +139,7 @@ export class PackWorkerDO extends DurableObject<Env> {
       );
       for (const compressed of results) {
         if (!compressed) continue;
-        const entry = this.buildEntry(wasm, compressed);
+        const entry = this.buildPackEntry(wasm, compressed);
         if (entry) { entries.push(entry); objectCount++; }
       }
     }
@@ -164,26 +162,158 @@ export class PackWorkerDO extends DurableObject<Env> {
     });
   }
 
-  /** Decompress a git object, re-compress content for packfile format. */
-  private buildEntry(wasm: WasmEngine, compressed: Uint8Array): Uint8Array | null {
-    // Decompress git object
-    let raw: Uint8Array | null = null;
-    const sizes = [4, 16, 64, 256];
-    for (const mult of sizes) {
-      const maxSize = compressed.length * mult;
-      if (maxSize > 32 * 1024 * 1024) break;
-      try {
-        raw = wasm.zlibInflate(compressed, maxSize);
-        if (raw.length > 0) break;
-        raw = null;
-      } catch (err) {
-        raw = null;
-        if (mult === sizes[sizes.length - 1]) {
-          console.error(`pack-worker: inflate failed after all attempts (${compressed.length} bytes): ${err}`);
+  // === write-worktree: read blobs from R2, write raw content to worktree paths ===
+
+  private async handleWriteWorktree(request: Request): Promise<Response> {
+    const body = await request.json() as WorktreeRequest;
+    const { repoPath, entries } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
+    if (!entries || entries.length === 0) {
+      return Response.json({ written: 0 });
+    }
+    if (entries.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many entries\n", { status: 400 });
+    }
+
+    // Validate all keys are scoped to this repo
+    const repoPrefix = repoPath + "/";
+    for (const entry of entries) {
+      if (entry.chunkKey && !entry.chunkKey.startsWith(repoPrefix)) {
+        return new Response("Invalid key scope\n", { status: 400 });
+      }
+      if (entry.looseKey && !entry.looseKey.startsWith(repoPrefix)) {
+        return new Response("Invalid key scope\n", { status: 400 });
+      }
+      if (!entry.r2Key.startsWith(repoPrefix)) {
+        return new Response("Invalid worktree key scope\n", { status: 400 });
+      }
+    }
+
+    const wasm = await this.getWasm();
+    const r2 = this.env.OBJECTS;
+
+    // Group by chunk key
+    const byChunk = new Map<string, WorktreeEntry[]>();
+    const loose: WorktreeEntry[] = [];
+    for (const entry of entries) {
+      if (entry.chunkKey) {
+        let list = byChunk.get(entry.chunkKey);
+        if (!list) { list = []; byChunk.set(entry.chunkKey, list); }
+        list.push(entry);
+      } else {
+        loose.push(entry);
+      }
+    }
+
+    // Fetch chunks
+    const chunkData = await this.fetchChunks(r2, [...byChunk.keys()]);
+
+    let written = 0;
+    const WRITE_CONCURRENCY = 50;
+    const writes: Promise<void>[] = [];
+
+    // Process chunk-indexed blobs
+    for (const [chunkKey, chunkEntries] of byChunk) {
+      const data = chunkData.get(chunkKey);
+      if (!data) continue;
+
+      for (const entry of chunkEntries) {
+        if (entry.offset === undefined || entry.length === undefined) continue;
+        const compressed = data.subarray(entry.offset, entry.offset + entry.length);
+        const content = this.decompressBlob(wasm, compressed);
+        if (content) {
+          writes.push(r2.put(entry.r2Key, content));
+          written++;
+          if (writes.length >= WRITE_CONCURRENCY) {
+            await Promise.all(writes.splice(0));
+          }
         }
       }
     }
-    if (!raw || raw.length === 0) return null;
+
+    // Process loose blobs
+    const CONCURRENCY = 10;
+    for (let i = 0; i < loose.length; i += CONCURRENCY) {
+      const batch = loose.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async entry => {
+          const key = entry.looseKey!;
+          const obj = await r2.get(key);
+          if (!obj) return { entry, compressed: null as Uint8Array | null };
+          return { entry, compressed: new Uint8Array(await obj.arrayBuffer()) };
+        })
+      );
+      for (const { entry, compressed } of results) {
+        if (!compressed) continue;
+        const content = this.decompressBlob(wasm, compressed);
+        if (content) {
+          writes.push(r2.put(entry.r2Key, content));
+          written++;
+          if (writes.length >= WRITE_CONCURRENCY) {
+            await Promise.all(writes.splice(0));
+          }
+        }
+      }
+    }
+
+    // Flush remaining writes
+    if (writes.length > 0) await Promise.all(writes);
+
+    return Response.json({ written });
+  }
+
+  // === Shared utilities ===
+
+  private validateKeyScope(repoPath: string, objects: ObjectDescriptor[]): boolean {
+    const repoPrefix = repoPath + "/";
+    for (const desc of objects) {
+      if (desc.chunkKey && !desc.chunkKey.startsWith(repoPrefix)) return false;
+      if (desc.looseKey && !desc.looseKey.startsWith(repoPrefix)) return false;
+    }
+    return true;
+  }
+
+  private async fetchChunks(r2: R2Bucket, keys: string[]): Promise<Map<string, Uint8Array>> {
+    const CONCURRENCY = 10;
+    const chunkData = new Map<string, Uint8Array>();
+    for (let i = 0; i < keys.length; i += CONCURRENCY) {
+      const batch = keys.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async key => {
+          const obj = await r2.get(key);
+          if (!obj) return { key, data: null };
+          return { key, data: new Uint8Array(await obj.arrayBuffer()) };
+        })
+      );
+      for (const { key, data } of results) {
+        if (data) chunkData.set(key, data);
+      }
+    }
+    return chunkData;
+  }
+
+  /** Decompress a git object, extract blob content (for worktree writes). */
+  private decompressBlob(wasm: WasmEngine, compressed: Uint8Array): Uint8Array | null {
+    const raw = this.inflateObject(wasm, compressed);
+    if (!raw) return null;
+
+    // Parse "type size\0content" — only extract blobs
+    const spaceIdx = raw.indexOf(0x20);
+    const nullIdx = raw.indexOf(0x00);
+    if (spaceIdx === -1 || nullIdx === -1) return null;
+
+    const typeStr = decoder.decode(raw.subarray(0, spaceIdx));
+    if (typeStr !== "blob") return null;
+
+    return raw.subarray(nullIdx + 1);
+  }
+
+  /** Decompress a git object, re-compress content for packfile format. */
+  private buildPackEntry(wasm: WasmEngine, compressed: Uint8Array): Uint8Array | null {
+    const raw = this.inflateObject(wasm, compressed);
+    if (!raw) return null;
 
     // Parse "type size\0content"
     const spaceIdx = raw.indexOf(0x20);
@@ -214,4 +344,40 @@ export class PackWorkerDO extends DurableObject<Env> {
     entry.set(packCompressed, headerLen);
     return entry;
   }
+
+  /** Inflate a zlib-compressed git object, trying increasing buffer sizes. */
+  private inflateObject(wasm: WasmEngine, compressed: Uint8Array): Uint8Array | null {
+    const sizes = [4, 16, 64, 256];
+    for (const mult of sizes) {
+      const maxSize = compressed.length * mult;
+      if (maxSize > 32 * 1024 * 1024) break;
+      try {
+        const raw = wasm.zlibInflate(compressed, maxSize);
+        if (raw.length > 0) return raw;
+      } catch (err) {
+        if (mult === sizes[sizes.length - 1]) {
+          console.error(`pack-worker: inflate failed after all attempts (${compressed.length} bytes): ${err}`);
+        }
+      }
+    }
+    return null;
+  }
+}
+
+function groupByChunk(objects: ObjectDescriptor[]): {
+  byChunk: Map<string, ObjectDescriptor[]>;
+  loose: ObjectDescriptor[];
+} {
+  const byChunk = new Map<string, ObjectDescriptor[]>();
+  const loose: ObjectDescriptor[] = [];
+  for (const desc of objects) {
+    if (desc.chunkKey) {
+      let list = byChunk.get(desc.chunkKey);
+      if (!list) { list = []; byChunk.set(desc.chunkKey, list); }
+      list.push(desc);
+    } else {
+      loose.push(desc);
+    }
+  }
+  return { byChunk, loose };
 }

@@ -5,6 +5,14 @@
 //
 // The vinext UI reads these files directly — no git decompression needed.
 //
+// Two modes:
+//   1. Local — reads blobs and writes to R2 within the coordinator DO
+//   2. Fan-out — dispatches blob reads + R2 writes to compute worker pool
+//
+// Fan-out activates when PACK_WORKER binding is available and file count
+// exceeds FANOUT_THRESHOLD. Workers read blobs from R2 chunks independently,
+// decompress, and write raw content to worktree paths.
+//
 // Optimization: On incremental push, diffs the old and new trees and only
 // writes changed/added files, deletes removed files. Avoids rewriting
 // the entire worktree on every push.
@@ -13,8 +21,15 @@ import { GitEngine, OBJ_TREE, OBJ_BLOB, OBJ_COMMIT } from "./git-engine";
 import type { Env } from "./env";
 import type { ObjectCache } from "./packfile-reader";
 import { toHex } from "./hex";
+import { dispatchToPool, batchForPool } from "./compute-pool";
 
 const decoder = new TextDecoder();
+
+/** Fan out worktree writes when file count exceeds this. */
+const FANOUT_THRESHOLD = 200;
+
+/** Max entries per worker batch. */
+const FANOUT_BATCH_SIZE = 500;
 
 /**
  * Materialize the tree at `commitSha` into R2 worktree files for `branch`.
@@ -81,6 +96,14 @@ export async function materializeWorktree(
   // Full materialization: delete all old files, write all new files
   await deleteByPrefix(env.OBJECTS, prefix);
 
+  // Fan-out path: dispatch blob writes to compute worker pool
+  const pool = env.PACK_WORKER;
+  if (pool && newFiles.size > FANOUT_THRESHOLD) {
+    await materializeWorktreeFanout(engine, pool, repoPath, branch, newFiles);
+    return;
+  }
+
+  // Local path: read blobs and write within this DO
   const entries = [...newFiles.entries()];
 
   // Process in read+write batches of 500 to bound memory and yield control
@@ -122,6 +145,58 @@ export async function materializeWorktree(
       await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
+}
+
+/**
+ * Fan-out worktree materialization: dispatch blob reads + writes to compute workers.
+ * Workers read compressed blobs from R2 chunks, decompress, write raw content.
+ * The coordinator only sends metadata (sha + R2 key mappings), not blob data.
+ */
+async function materializeWorktreeFanout(
+  engine: GitEngine,
+  pool: DurableObjectNamespace,
+  repoPath: string,
+  branch: string,
+  files: Map<string, string>,
+): Promise<void> {
+  // Look up chunk metadata so workers know where to read each blob
+  const shas = [...new Set(files.values())];
+  const chunkMeta = engine.lookupChunkMeta(shas);
+  const metaBySha = new Map(chunkMeta.map(m => [m.sha, m]));
+
+  // Build worker entries: each entry tells a worker where to read + where to write
+  const worktreeEntries: Array<{
+    blobSha: string;
+    r2Key: string;
+    chunkKey?: string;
+    offset?: number;
+    length?: number;
+    looseKey?: string;
+  }> = [];
+
+  for (const [filepath, blobSha] of files) {
+    const meta = metaBySha.get(blobSha);
+    worktreeEntries.push({
+      blobSha,
+      r2Key: `${repoPath}/worktrees/${branch}/${filepath}`,
+      chunkKey: meta?.chunkKey,
+      offset: meta?.offset,
+      length: meta?.length,
+      looseKey: meta?.looseKey,
+    });
+  }
+
+  const tasks = batchForPool(worktreeEntries, FANOUT_BATCH_SIZE);
+
+  await dispatchToPool(pool, tasks, async (worker, entries) => {
+    const resp = await worker.fetch("https://worker/worktree", {
+      method: "POST",
+      headers: { "x-action": "write-worktree" },
+      body: JSON.stringify({ repoPath, entries }),
+    });
+    if (!resp.ok) throw new Error(`write-worktree: ${resp.status}`);
+    return resp.json();
+  });
 }
 
 async function readObjectCached(

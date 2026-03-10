@@ -1545,6 +1545,51 @@ describe("Fan-out packfile assembly", () => {
 });
 
 // ============================================================
+// Fan-out worktree materialization
+// ============================================================
+describe("Fan-out worktree materialization", () => {
+  it("should materialize worktree files via compute pool", async () => {
+    const { materializeWorktree } = await import("../src/checkout");
+    const repoPath = "fanout-wt/test";
+    const branch = "main";
+
+    // Set up repo via DO so we have SQLite context
+    const store = getStore(repoPath);
+    await store.fetch(new Request("http://do/init", {
+      method: "POST",
+      headers: { "x-action": "api", "x-repo-path": repoPath, "x-api-action": "init", "content-type": "application/json" },
+    }));
+
+    // Create enough blobs to exceed FANOUT_THRESHOLD (200)
+    const engine = new GitEngine(env.OBJECTS, repoPath);
+    const treeEntries: Uint8Array[] = [];
+    for (let i = 0; i < 250; i++) {
+      const content = encoder.encode(`worktree file ${i}\n`);
+      const sha = await engine.storeObject(OBJ_BLOB, content);
+      treeEntries.push(buildTreeEntry("100644", `wt-${i}.txt`, hexToBytes(sha)));
+    }
+    const treeContent = concatBytes(...treeEntries);
+    const treeSha = await engine.storeObject(OBJ_TREE, treeContent);
+    const commitText = `tree ${treeSha}\nauthor W <w@w.com> 1700000000 +0000\ncommitter W <w@w.com> 1700000000 +0000\n\nworktree test\n`;
+    const commitSha = await engine.storeObject(OBJ_COMMIT, encoder.encode(commitText));
+
+    // Materialize worktree — should fan out to compute pool
+    await materializeWorktree(engine, env, repoPath, branch, commitSha);
+
+    // Verify some files were written to R2
+    const file0 = await env.OBJECTS.get(`${repoPath}/worktrees/${branch}/wt-0.txt`);
+    expect(file0).not.toBeNull();
+    const text0 = await file0!.text();
+    expect(text0).toBe("worktree file 0\n");
+
+    const file249 = await env.OBJECTS.get(`${repoPath}/worktrees/${branch}/wt-249.txt`);
+    expect(file249).not.toBeNull();
+    const text249 = await file249!.text();
+    expect(text249).toBe("worktree file 249\n");
+  });
+});
+
+// ============================================================
 // Helpers
 // ============================================================
 

@@ -2,7 +2,7 @@
 //
 // Two modes:
 //   1. Local — reads objects from R2, compresses with WASM, assembles locally
-//   2. Fan-out — distributes work to PackWorkerDO pool for parallel assembly
+//   2. Fan-out — distributes work to a pool of compute workers for parallel assembly
 //
 // Fan-out activates when PACK_WORKER binding is available and object count
 // exceeds FANOUT_THRESHOLD. Each worker reads its own R2 slice, decompresses
@@ -10,17 +10,15 @@
 
 import type { GitEngine } from "./git-engine";
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
+import { dispatchToPool, batchForPool } from "./compute-pool";
 
 const PACK_SIGNATURE = new Uint8Array([0x50, 0x41, 0x43, 0x4b]); // "PACK"
 
 /** Fan out when object count exceeds this (below this, local is faster). */
 const FANOUT_THRESHOLD = 200;
 
-/** Max objects per PackWorkerDO batch. */
+/** Max objects per worker batch. */
 const FANOUT_BATCH_SIZE = 500;
-
-/** Max concurrent PackWorkerDO slots. */
-const FANOUT_POOL_SIZE = 20;
 
 /** Convert internal object type to packfile type number. */
 export function objectToPackType(objType: number): number {
@@ -158,7 +156,7 @@ export function typeSizeHeaderLen(size: number): number {
   return len;
 }
 
-/** Fan-out packfile assembly: scatter object batches to PackWorkerDO pool, gather segments. */
+/** Fan-out packfile assembly: scatter object batches to compute pool, gather segments. */
 async function buildPackfileFanout(
   engine: GitEngine,
   objectShas: string[],
@@ -166,46 +164,31 @@ async function buildPackfileFanout(
 ): Promise<Uint8Array> {
   // Look up R2 chunk metadata for all SHAs so workers know where to read
   const descriptors = engine.lookupChunkMeta(objectShas);
+  const tasks = batchForPool(descriptors, FANOUT_BATCH_SIZE);
 
-  // Split into batches, assign round-robin to pool slots
-  const batches: Array<{ slotIndex: number; objects: typeof descriptors }> = [];
-  for (let i = 0; i < descriptors.length; i += FANOUT_BATCH_SIZE) {
-    const slotIndex = batches.length % FANOUT_POOL_SIZE;
-    batches.push({ slotIndex, objects: descriptors.slice(i, i + FANOUT_BATCH_SIZE) });
-  }
-
-  // Fan out to PackWorkerDO pool via Promise.allSettled
-  const results = await Promise.allSettled(
-    batches.map(async ({ slotIndex, objects }) => {
-      const id = packWorker.idFromName(`pack-slot-${slotIndex}`);
-      const worker = packWorker.get(id);
-      const resp = await worker.fetch("https://pack-worker/build", {
+  // Dispatch to compute pool — each worker reads from R2 and builds a segment
+  const results = await dispatchToPool(
+    packWorker,
+    tasks,
+    async (worker, objects) => {
+      const resp = await worker.fetch("https://worker/build", {
         method: "POST",
         headers: { "x-action": "build-segment" },
         body: JSON.stringify({ repoPath: engine.repoPath, objects }),
       });
-      if (!resp.ok) throw new Error(`PackWorkerDO slot ${slotIndex}: ${resp.status}`);
+      if (!resp.ok) throw new Error(`build-segment: ${resp.status}`);
       const count = parseInt(resp.headers.get("x-object-count") ?? "0", 10);
       const segment = new Uint8Array(await resp.arrayBuffer());
       return { segment, count };
-    })
+    }
   );
 
-  // Gather segments — fail if any batch was rejected (don't produce incomplete packfiles)
+  // Gather segments
   const segments: Uint8Array[] = [];
   let objectCount = 0;
-  const failures: string[] = [];
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    if (r.status === "fulfilled") {
-      segments.push(r.value.segment);
-      objectCount += r.value.count;
-    } else {
-      failures.push(`batch ${i}: ${r.reason}`);
-    }
-  }
-  if (failures.length > 0) {
-    throw new Error(`PackWorkerDO fan-out failed: ${failures.join("; ")}`);
+  for (const { segment, count } of results) {
+    segments.push(segment);
+    objectCount += count;
   }
 
   // Assemble final packfile: header + segments + SHA-1 trailer
