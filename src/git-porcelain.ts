@@ -1019,6 +1019,7 @@ export class GitPorcelain {
   private async walkTree(treeSha: string, prefix: string): Promise<FileEntry[]> {
     const result: FileEntry[] = [];
     const MAX_DEPTH = 100;
+    const MAX_FILES = 100_000;
     let depth = 0;
     // BFS: process trees level-by-level, batch-reading sibling subtrees
     let frontier: Array<{ sha: string; prefix: string }> = [{ sha: treeSha, prefix }];
@@ -1040,6 +1041,7 @@ export class GitPorcelain {
             nextFrontier.push({ sha: entry.sha, prefix: fullPath });
           } else {
             result.push({ path: fullPath, mode: entry.mode, type: "blob", sha: entry.sha });
+            if (result.length >= MAX_FILES) return result;
           }
         }
       }

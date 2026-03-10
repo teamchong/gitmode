@@ -50,6 +50,7 @@ function corsHeaders(): Record<string, string> {
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
+    "Cache-Control": "no-store",
   };
 }
 

@@ -21,6 +21,8 @@ const MAX_REF_NAME_LEN = 256;
 const MAX_MESSAGE_LEN = 1024 * 1024; // 1MB
 const MAX_DESCRIPTION_LEN = 10 * 1024; // 10KB
 const MAX_SHORT_FIELD_LEN = 1024; // 1KB (author, email, tagger)
+const MAX_FILES_PER_COMMIT = 10_000;
+const MAX_API_BODY = 10 * 1024 * 1024; // 10MB
 const INVALID_REF_CHARS = /[\x00-\x1f\x7f ~^:?*\[\\]/;
 
 export function validateRefName(name: string): void {
@@ -141,6 +143,11 @@ export class RepoStore extends DurableObject<Env> {
       }
 
       case "upload-pack": {
+        // Upload-pack request body is want/have lines — typically small
+        const uploadLen = parseInt(request.headers.get("content-length") ?? "0", 10);
+        if (uploadLen > 1024 * 1024) { // 1MB — generous for want/have lines
+          return new Response("Request too large\n", { status: 413 });
+        }
         const body = new Uint8Array(await request.arrayBuffer());
         return handleUploadPack(engine, body, this.env.PACK_WORKER);
       }
@@ -228,6 +235,11 @@ export class RepoStore extends DurableObject<Env> {
       // === Porcelain API ===
 
       case "api": {
+        // Guard against oversized JSON bodies
+        const apiContentLen = parseInt(request.headers.get("content-length") ?? "0", 10);
+        if (apiContentLen > MAX_API_BODY) {
+          return Response.json({ error: "Request body too large" }, { status: 413 });
+        }
         const porcelain = new GitPorcelain(engine);
         const url = new URL(request.url);
         const apiAction = request.headers.get("x-api-action") ?? "";
@@ -305,6 +317,7 @@ async function handleApiAction(
       if (!body.ref) throw new Error("Missing required field: ref");
       if (!body.message) throw new Error("Missing required field: message");
       if (!body.files || !Array.isArray(body.files)) throw new Error("Missing required field: files");
+      if (body.files.length > MAX_FILES_PER_COMMIT) throw new Error("Too many files (max 10000)");
       if (body.message.length > MAX_MESSAGE_LEN) throw new Error("Commit message too long (max 1MB)");
       for (const file of body.files) {
         validateFilePath(file.path);
@@ -335,7 +348,7 @@ async function handleApiAction(
 
     case "delete-branch": {
       const body = await request.json() as { name: string };
-      requireString(body.name, "name");
+      validateRefName(requireString(body.name, "name"));
       porcelain.deleteBranch(body.name);
       return Response.json({ ok: true });
     }
@@ -395,7 +408,7 @@ async function handleApiAction(
 
     case "delete-tag": {
       const body = await request.json() as { name: string };
-      requireString(body.name, "name");
+      validateRefName(requireString(body.name, "name"));
       porcelain.deleteTag(body.name);
       return Response.json({ ok: true });
     }
@@ -562,6 +575,6 @@ async function handleApiAction(
     }
 
     default:
-      return Response.json({ error: `Unknown API action: ${action}` }, { status: 400 });
+      return Response.json({ error: "Unknown action" }, { status: 400 });
   }
 }
