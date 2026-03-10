@@ -25,7 +25,7 @@ gitmode ships as an npm package with two entry points for different use cases:
     Full git server for Cloudflare Workers. Smart HTTP transport, 29-endpoint REST API, R2 chunk storage, Durable Objects with SQLite. Uses the **865KB WASM** module with libgit2.
 
     ```ts
-    import { createHandler, RepoStore } from "gitmode";
+    import { createHandler, RepoStore, PackWorkerDO } from "gitmode";
     ```
   </Card>
   <Card title="Client — gitmode/client" icon="rocket">
@@ -72,8 +72,8 @@ npx gitmode deploy
 Or add to an existing Worker:
 
 ```ts
-import { RepoStore, createHandler } from "gitmode";
-export { RepoStore };
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
+export { RepoStore, PackWorkerDO };
 export default { fetch: createHandler() };
 ```
 

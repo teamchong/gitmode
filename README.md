@@ -94,6 +94,7 @@ Benchmarked on localhost dev server (wrangler dev) with R2 chunk storage, batch 
 Key optimizations:
 - **R2 chunk storage**: Objects bundled into ~2MB R2 values with SQLite index — reduces 10K individual R2 ops to ~50 chunk reads
 - **Batch readObjects**: Groups SHAs by chunk key, fetches each chunk once, extracts all objects
+- **Fan-out packfile assembly**: Large clones (>200 objects) distribute work to a pool of PackWorkerDO instances for parallel R2 reads + compression, overcoming the single-DO 128MB memory limit
 - **Streaming clone**: ReadableStream for sideband-wrapped packfile — 1x memory vs 3x buffered
 - **Async worktree**: Large pushes (>500 objects) defer worktree materialization via `ctx.waitUntil()`, yielding between batches
 - **SQLite-first lookups**: `hasObject()` checks chunk index before R2 HEAD — no round trip
@@ -155,16 +156,16 @@ npx gitmode deploy   # Deploy to Cloudflare Workers
 Or import directly into your Worker:
 
 ```ts
-import { RepoStore, createHandler } from "gitmode";
-export { RepoStore };
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
+export { RepoStore, PackWorkerDO };
 export default { fetch: createHandler() };
 ```
 
 With custom auth:
 
 ```ts
-import { RepoStore, createHandler } from "gitmode";
-export { RepoStore };
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
+export { RepoStore, PackWorkerDO };
 const gitmode = createHandler();
 export default {
   fetch(req, env) {
@@ -220,11 +221,12 @@ gitmode/
 │   ├── wasm-engine.ts       Typed WASM wrapper (server)
 │   ├── wasm-engine-core.ts  Typed WASM wrapper (client)
 │   ├── repo-store.ts        Durable Object (per-repo SQLite)
+│   ├── pack-worker.ts       PackWorkerDO (fan-out packfile assembly)
 │   ├── upload-pack.ts       Clone/fetch handler (streaming response)
 │   ├── receive-pack.ts      Push handler + commit indexing + async worktree
 │   ├── checkout.ts          Worktree materialization (incremental + batched)
 │   ├── info-refs.ts         Ref advertisement
-│   ├── packfile-builder.ts  Assemble packfiles (500-SHA batches, chunk concat)
+│   ├── packfile-builder.ts  Assemble packfiles (local or fan-out to PackWorkerDO pool)
 │   ├── packfile-reader.ts   Unpack received packfiles (streaming R2 flushes)
 │   ├── pkt-line.ts          Git pkt-line protocol framing
 │   ├── ssh-handler.ts       SSH command parser
@@ -232,7 +234,7 @@ gitmode/
 ├── worker/                  Cloudflare Worker entry (with vinext UI)
 ├── app/                     vinext UI (React Server Components)
 ├── test/
-│   ├── gitmode.test.ts      Integration tests (87 tests)
+│   ├── gitmode.test.ts      Integration tests (89 tests)
 │   ├── stress.sh            Stress test (100–10K files)
 │   ├── conformance.sh       Git protocol conformance (31 tests)
 │   └── bench.sh             Performance benchmarks

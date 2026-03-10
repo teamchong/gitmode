@@ -23,8 +23,8 @@ npx gitmode deploy   # Deploys to Cloudflare Workers
 ### Import into an Existing Worker
 
 ```ts
-import { RepoStore, createHandler } from "gitmode";
-export { RepoStore };
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
+export { RepoStore, PackWorkerDO };
 
 // Minimal — all git protocol + REST API routes handled automatically
 export default { fetch: createHandler() };
@@ -33,8 +33,8 @@ export default { fetch: createHandler() };
 With custom auth:
 
 ```ts
-import { RepoStore, createHandler } from "gitmode";
-export { RepoStore };
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
+export { RepoStore, PackWorkerDO };
 const gitmode = createHandler();
 export default {
   fetch(req, env) {

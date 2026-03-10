@@ -56,11 +56,16 @@ Whether scaffolded via `npx gitmode init` or written manually, your `wrangler.js
       {
         "name": "REPO_STORE",
         "class_name": "RepoStore"
+      },
+      {
+        "name": "PACK_WORKER",
+        "class_name": "PackWorkerDO"
       }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["RepoStore"] }
+    { "tag": "v1", "new_sqlite_classes": ["RepoStore"] },
+    { "tag": "v2", "new_classes": ["PackWorkerDO"] }
   ],
   "rules": [
     {

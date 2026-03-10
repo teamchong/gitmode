@@ -4,10 +4,10 @@
 //
 // Docs: https://github.com/teamchong/gitmode
 
-import { RepoStore, createHandler } from "gitmode";
+import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
 
-// Re-export the Durable Object class (required by Cloudflare)
-export { RepoStore };
+// Re-export the Durable Object classes (required by Cloudflare)
+export { RepoStore, PackWorkerDO };
 
 // Create the fetch handler
 const handler = createHandler();
