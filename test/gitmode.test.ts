@@ -1545,6 +1545,144 @@ describe("Fan-out packfile assembly", () => {
 });
 
 // ============================================================
+// Inline diff with content
+// ============================================================
+describe("Inline diff with content", () => {
+  it("should return unified diff patches via API", async () => {
+    const repoPath = "diff-content/test";
+    // Init
+    await SELF.fetch(`http://localhost/api/repos/${repoPath}/init`, { method: "POST" });
+
+    // Commit v1
+    const v1 = await SELF.fetch(`http://localhost/api/repos/${repoPath}/commits`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ref: "main",
+        message: "v1",
+        author: "A",
+        email: "a@a.com",
+        files: [
+          { path: "hello.txt", content: "line 1\nline 2\nline 3\n" },
+          { path: "unchanged.txt", content: "same\n" },
+        ],
+      }),
+    });
+    expect(v1.status).toBe(200);
+    const { sha: sha1 } = await v1.json() as { sha: string };
+
+    // Commit v2 with modifications
+    const v2 = await SELF.fetch(`http://localhost/api/repos/${repoPath}/commits`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ref: "main",
+        message: "v2",
+        author: "A",
+        email: "a@a.com",
+        files: [
+          { path: "hello.txt", content: "line 1\nline 2 modified\nline 3\nline 4\n" },
+          { path: "new.txt", content: "brand new\n" },
+          { path: "unchanged.txt", content: "same\n" },
+        ],
+      }),
+    });
+    const { sha: sha2 } = await v2.json() as { sha: string };
+
+    // Get diff WITH content
+    const diffResp = await SELF.fetch(
+      `http://localhost/api/repos/${repoPath}/diff?a=${sha1}&b=${sha2}&content=true`
+    );
+    const diffJson = await diffResp.json() as Record<string, unknown>;
+    if (diffResp.status !== 200) {
+      throw new Error(`Diff failed: ${JSON.stringify(diffJson)}`);
+    }
+    const { entries } = diffJson as { entries: Array<{
+      path: string; status: string; patch?: string; binary?: boolean;
+      oldSize?: number; newSize?: number;
+    }> };
+
+    // hello.txt should have a unified diff patch
+    const hello = entries.find(e => e.path === "hello.txt");
+    expect(hello).toBeDefined();
+    expect(hello!.status).toBe("modified");
+    expect(hello!.patch).toContain("-line 2");
+    expect(hello!.patch).toContain("+line 2 modified");
+    expect(hello!.patch).toContain("+line 4");
+
+    // new.txt should show as added
+    const newFile = entries.find(e => e.path === "new.txt");
+    expect(newFile).toBeDefined();
+    expect(newFile!.status).toBe("added");
+    expect(newFile!.patch).toContain("+brand new");
+
+    // unchanged.txt should NOT appear in diff
+    expect(entries.find(e => e.path === "unchanged.txt")).toBeUndefined();
+  });
+
+  it("should return structural diff without content by default", async () => {
+    const repoPath = "diff-content/test";
+    const logResp = await SELF.fetch(`http://localhost/api/repos/${repoPath}/log?max=2`);
+    const { commits } = await logResp.json() as { commits: Array<{ sha: string }> };
+    const [newer, older] = commits;
+
+    // Default diff (no content=true) should NOT have patches
+    const diffResp = await SELF.fetch(
+      `http://localhost/api/repos/${repoPath}/diff?a=${older.sha}&b=${newer.sha}`
+    );
+    const { entries } = await diffResp.json() as { entries: Array<{ path: string; patch?: string }> };
+    for (const entry of entries) {
+      expect(entry.patch).toBeUndefined();
+    }
+  });
+});
+
+// ============================================================
+// Grep across repo
+// ============================================================
+describe("Grep across repo", () => {
+  it("should search blob content and return matches with context", async () => {
+    const repoPath = "grep/test";
+    await SELF.fetch(`http://localhost/api/repos/${repoPath}/init`, { method: "POST" });
+
+    await SELF.fetch(`http://localhost/api/repos/${repoPath}/commits`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ref: "main",
+        message: "files with searchable content",
+        author: "G",
+        email: "g@g.com",
+        files: [
+          { path: "src/main.ts", content: "import { foo } from './foo';\nconst x = foo();\nconsole.log(x);\n" },
+          { path: "src/foo.ts", content: "export function foo() {\n  return 42;\n}\n" },
+          { path: "readme.md", content: "# Project\nNo code here\n" },
+        ],
+      }),
+    });
+
+    const resp = await SELF.fetch(
+      `http://localhost/api/repos/${repoPath}/grep?pattern=foo&context=1`
+    );
+    const { matches } = await resp.json() as { matches: Array<{
+      path: string;
+      lines: Array<{ lineNumber: number; text: string; isMatch: boolean }>;
+    }> };
+
+    // Should match in main.ts and foo.ts but not readme.md
+    expect(matches.length).toBe(2);
+    const mainMatch = matches.find(m => m.path === "src/main.ts");
+    expect(mainMatch).toBeDefined();
+    expect(mainMatch!.lines.some(l => l.isMatch && l.text.includes("foo"))).toBe(true);
+
+    const fooMatch = matches.find(m => m.path === "src/foo.ts");
+    expect(fooMatch).toBeDefined();
+    // With context=1, should include surrounding lines
+    expect(fooMatch!.lines.length).toBeGreaterThan(1);
+  });
+});
+
+// ============================================================
 // Fan-out worktree materialization
 // ============================================================
 describe("Fan-out worktree materialization", () => {

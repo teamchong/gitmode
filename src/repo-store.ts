@@ -248,7 +248,7 @@ export class RepoStore extends DurableObject<Env> {
         const url = new URL(request.url);
         const apiAction = request.headers.get("x-api-action") ?? "";
         try {
-          return await handleApiAction(porcelain, engine, apiAction, request, url);
+          return await handleApiAction(porcelain, engine, apiAction, request, url, this.env);
         } catch (err) {
           const raw = err instanceof Error ? err.message : String(err);
           // Only return known user-facing errors; hide internal details
@@ -269,6 +269,7 @@ async function handleApiAction(
   action: string,
   request: Request,
   url: URL,
+  env: Env,
 ): Promise<Response> {
   switch (action) {
     // --- init ---
@@ -432,8 +433,21 @@ async function handleApiAction(
     case "diff": {
       const refA = url.searchParams.get("a") ?? url.searchParams.get("from") ?? "";
       const refB = url.searchParams.get("b") ?? url.searchParams.get("to") ?? undefined;
-      const entries = await porcelain.diff(refA, refB);
+      const withContent = url.searchParams.get("content") === "true";
+      const entries = withContent
+        ? await porcelain.diffWithContent(refA, refB, env.PACK_WORKER)
+        : await porcelain.diff(refA, refB);
       return Response.json({ entries });
+    }
+
+    // --- grep ---
+    case "grep": {
+      const ref = url.searchParams.get("ref") ?? "HEAD";
+      const pattern = url.searchParams.get("pattern") ?? url.searchParams.get("q") ?? "";
+      if (!pattern) return Response.json({ error: "Missing pattern" }, { status: 400 });
+      const contextLines = Math.min(parseInt(url.searchParams.get("context") ?? "2", 10) || 2, 10);
+      const matches = await porcelain.grep(ref, pattern, env.PACK_WORKER, contextLines);
+      return Response.json({ matches });
     }
 
     // --- merge ---

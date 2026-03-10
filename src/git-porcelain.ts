@@ -5,6 +5,8 @@
 
 import { GitEngine, OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 import { toHex } from "./hex";
+import { unifiedDiff, isBinary } from "./diff-engine";
+import { dispatchToPool, batchForPool } from "./compute-pool";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -47,6 +49,12 @@ export interface DiffEntry {
   status: "added" | "modified" | "deleted" | "renamed";
   oldSha?: string;
   newSha?: string;
+  /** Unified diff patch (only when content diffs requested). */
+  patch?: string;
+  /** True if file is binary (no patch available). */
+  binary?: boolean;
+  oldSize?: number;
+  newSize?: number;
 }
 
 export interface BranchInfo {
@@ -512,6 +520,260 @@ export class GitPorcelain {
     }
 
     return this.diffTrees(treeA, treeB, "");
+  }
+
+  /**
+   * Diff with inline content patches. Uses compute pool fan-out when available.
+   * Each file's blob pair is read and diffed — locally or across workers.
+   */
+  async diffWithContent(
+    refA: string,
+    refB?: string,
+    packWorker?: DurableObjectNamespace,
+  ): Promise<DiffEntry[]> {
+    // Get structural diff first (just paths + SHAs)
+    const entries = await this.diff(refA, refB);
+    if (entries.length === 0) return entries;
+
+    // Fan-out path: dispatch blob reads + diff computation to workers
+    if (packWorker && entries.length > 10) {
+      return this.diffWithContentFanout(entries, packWorker);
+    }
+
+    // Local path: read blobs and diff in the coordinator
+    const shasToRead = new Set<string>();
+    for (const e of entries) {
+      if (e.oldSha) shasToRead.add(e.oldSha);
+      if (e.newSha) shasToRead.add(e.newSha);
+    }
+    const objects = shasToRead.size > 0
+      ? await this.engine.readObjects([...shasToRead])
+      : new Map<string, { type: number; content: Uint8Array }>();
+
+    for (const entry of entries) {
+      const oldObj = entry.oldSha ? objects.get(entry.oldSha) : null;
+      const newObj = entry.newSha ? objects.get(entry.newSha) : null;
+      const oldData = oldObj?.type === OBJ_BLOB ? oldObj.content : null;
+      const newData = newObj?.type === OBJ_BLOB ? newObj.content : null;
+
+      entry.oldSize = oldData?.length;
+      entry.newSize = newData?.length;
+
+      if ((oldData && isBinary(oldData)) || (newData && isBinary(newData))) {
+        entry.binary = true;
+      } else {
+        const oldText = oldData ? decoder.decode(oldData) : "";
+        const newText = newData ? decoder.decode(newData) : "";
+        entry.patch = unifiedDiff(oldText, newText, entry.path, entry.path);
+      }
+    }
+
+    return entries;
+  }
+
+  private async diffWithContentFanout(
+    entries: DiffEntry[],
+    packWorker: DurableObjectNamespace,
+  ): Promise<DiffEntry[]> {
+    // Look up chunk metadata for all blob SHAs
+    const allShas = new Set<string>();
+    for (const e of entries) {
+      if (e.oldSha) allShas.add(e.oldSha);
+      if (e.newSha) allShas.add(e.newSha);
+    }
+    const chunkMeta = this.engine.lookupChunkMeta([...allShas]);
+    const metaBySha = new Map(chunkMeta.map(m => [m.sha, m]));
+
+    // Build diff pairs with R2 location info
+    const pairs = entries.map(e => {
+      const oldMeta = e.oldSha ? metaBySha.get(e.oldSha) : undefined;
+      const newMeta = e.newSha ? metaBySha.get(e.newSha) : undefined;
+      return {
+        path: e.path,
+        status: e.status as "added" | "modified" | "deleted",
+        oldSha: e.oldSha,
+        newSha: e.newSha,
+        oldChunkKey: oldMeta?.chunkKey,
+        oldOffset: oldMeta?.offset,
+        oldLength: oldMeta?.length,
+        oldLooseKey: oldMeta?.looseKey,
+        newChunkKey: newMeta?.chunkKey,
+        newOffset: newMeta?.offset,
+        newLength: newMeta?.length,
+        newLooseKey: newMeta?.looseKey,
+      };
+    });
+
+    const tasks = batchForPool(pairs, 100); // smaller batches — diff is compute-heavy
+
+    const results = await dispatchToPool(packWorker, tasks, async (worker, batch) => {
+      const resp = await worker.fetch("https://worker/diff", {
+        method: "POST",
+        headers: { "x-action": "diff-blobs" },
+        body: JSON.stringify({ repoPath: this.engine.repoPath, pairs: batch }),
+      });
+      if (!resp.ok) throw new Error(`diff-blobs: ${resp.status}`);
+      const data = await resp.json() as { diffs: Array<{
+        path: string; status: string; binary?: boolean; patch?: string;
+        oldSize?: number; newSize?: number;
+      }> };
+      return data.diffs;
+    });
+
+    // Merge results back into entries (preserve order)
+    const patchByPath = new Map<string, typeof results[0][0]>();
+    for (const batch of results) {
+      for (const d of batch) {
+        patchByPath.set(d.path, d);
+      }
+    }
+    for (const entry of entries) {
+      const result = patchByPath.get(entry.path);
+      if (result) {
+        entry.patch = result.patch;
+        entry.binary = result.binary;
+        entry.oldSize = result.oldSize;
+        entry.newSize = result.newSize;
+      }
+    }
+
+    return entries;
+  }
+
+  /**
+   * Search blob content across the current tree. Uses compute pool fan-out.
+   * Returns matching files with line numbers and context.
+   */
+  async grep(
+    ref: string,
+    pattern: string,
+    packWorker?: DurableObjectNamespace,
+    contextLines = 2,
+  ): Promise<Array<{
+    path: string;
+    sha: string;
+    lines: Array<{ lineNumber: number; text: string; isMatch: boolean }>;
+  }>> {
+    const refSha = await this.resolveRef(ref);
+    if (!refSha) return [];
+    const commit = await this.engine.readObject(refSha);
+    if (!commit || commit.type !== OBJ_COMMIT) return [];
+    const treeSha = parseCommit(refSha, commit.content).tree;
+
+    // Walk tree to get all blob paths + SHAs
+    const files: Array<{ path: string; sha: string }> = [];
+    await this.walkTreeFlat(treeSha, "", files);
+
+    if (files.length === 0) return [];
+
+    // Look up chunk metadata
+    const shas = files.map(f => f.sha);
+    const chunkMeta = this.engine.lookupChunkMeta(shas);
+    const metaBySha = new Map(chunkMeta.map(m => [m.sha, m]));
+
+    const grepEntries = files.map(f => {
+      const meta = metaBySha.get(f.sha);
+      return {
+        sha: f.sha,
+        path: f.path,
+        chunkKey: meta?.chunkKey,
+        offset: meta?.offset,
+        length: meta?.length,
+        looseKey: meta?.looseKey,
+      };
+    });
+
+    // Fan-out path
+    if (packWorker && grepEntries.length > 50) {
+      const tasks = batchForPool(grepEntries, 200);
+      const results = await dispatchToPool(packWorker, tasks, async (worker, batch) => {
+        const resp = await worker.fetch("https://worker/grep", {
+          method: "POST",
+          headers: { "x-action": "grep-blobs" },
+          body: JSON.stringify({ repoPath: this.engine.repoPath, pattern, entries: batch, contextLines }),
+        });
+        if (!resp.ok) throw new Error(`grep-blobs: ${resp.status}`);
+        const data = await resp.json() as { matches: Array<{
+          path: string; sha: string;
+          lines: Array<{ lineNumber: number; text: string; isMatch: boolean }>;
+        }> };
+        return data.matches;
+      });
+      return results.flat();
+    }
+
+    // Local path: read all blobs and search
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, "gm");
+    } catch {
+      return [];
+    }
+
+    const BATCH = 200;
+    const matches: Array<{
+      path: string; sha: string;
+      lines: Array<{ lineNumber: number; text: string; isMatch: boolean }>;
+    }> = [];
+
+    for (let i = 0; i < grepEntries.length; i += BATCH) {
+      const batch = grepEntries.slice(i, i + BATCH);
+      const batchShas = batch.map(e => e.sha);
+      const objects = await this.engine.readObjects(batchShas);
+
+      for (const entry of batch) {
+        const obj = objects.get(entry.sha);
+        if (!obj || obj.type !== OBJ_BLOB) continue;
+        if (isBinary(obj.content)) continue;
+
+        const text = decoder.decode(obj.content);
+        const lines = text.split("\n");
+        const matchedLineNums = new Set<number>();
+
+        for (let ln = 0; ln < lines.length; ln++) {
+          regex.lastIndex = 0;
+          if (regex.test(lines[ln])) matchedLineNums.add(ln);
+        }
+
+        if (matchedLineNums.size === 0) continue;
+        const clampedCtx = Math.min(contextLines, 10);
+        const outputLines: Array<{ lineNumber: number; text: string; isMatch: boolean }> = [];
+        const included = new Set<number>();
+        for (const ln of matchedLineNums) {
+          for (let c = Math.max(0, ln - clampedCtx); c <= Math.min(lines.length - 1, ln + clampedCtx); c++) {
+            if (!included.has(c)) {
+              included.add(c);
+              outputLines.push({ lineNumber: c + 1, text: lines[c], isMatch: matchedLineNums.has(c) });
+            }
+          }
+        }
+        outputLines.sort((a, b) => a.lineNumber - b.lineNumber);
+        matches.push({ path: entry.path, sha: entry.sha, lines: outputLines });
+      }
+    }
+
+    return matches;
+  }
+
+  /** Walk tree flat — collect { path, sha } pairs for all blobs. */
+  private async walkTreeFlat(
+    treeSha: string,
+    prefix: string,
+    result: Array<{ path: string; sha: string }>,
+    depth = 0,
+  ): Promise<void> {
+    if (depth > 100) return;
+    const tree = await this.engine.readObject(treeSha);
+    if (!tree || tree.type !== OBJ_TREE) return;
+
+    for (const entry of parseTreeEntries(tree.content)) {
+      const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.mode === "40000") {
+        await this.walkTreeFlat(entry.sha, fullPath, result, depth + 1);
+      } else {
+        result.push({ path: fullPath, sha: entry.sha });
+      }
+    }
   }
 
   // === merge (fast-forward) ===

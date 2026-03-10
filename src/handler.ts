@@ -333,9 +333,14 @@ async function routeApi(
     return sendApiAction(store, request, repoPath, "stats");
   }
 
-  // GET /diff?a=...&b=... (or ?from=...&to=...)
+  // GET /diff?a=...&b=...&content=true (or ?from=...&to=...)
   if (rest === "diff" && method === "GET") {
     return sendApiAction(store, request, repoPath, "diff");
+  }
+
+  // GET /grep?pattern=...&ref=...&context=...
+  if (rest === "grep" && method === "GET") {
+    return sendApiAction(store, request, repoPath, "grep");
   }
 
   // Branches

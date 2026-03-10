@@ -1,12 +1,19 @@
-// PackWorkerDO — general-purpose compute worker for fan-out operations
+// PackWorkerDO — edge compute worker for fan-out operations
 //
 // Each instance is a compute unit with its own ~128MB memory budget,
 // WASM engine, and R2 access. The coordinator (RepoStore) dispatches
 // work to a pool of these workers via RPC.
 //
+// The key principle: move compute to the data. Workers read from R2
+// directly and process data locally, returning only results — not
+// raw object bytes. This keeps the coordinator's memory flat.
+//
 // Actions:
 //   build-segment   — decompress git objects, re-compress for packfile format
 //   write-worktree  — read blobs from R2, write raw content to worktree paths
+//   diff-blobs      — read blob pairs from R2, compute unified diffs
+//   grep-blobs      — read blobs from R2, search content, return matches
+//   walk-trees      — read tree objects, parse entries, return child SHAs
 //
 // Pool slots use deterministic IDs ("slot-{N}") for warm reuse.
 
@@ -15,6 +22,8 @@ import type { Env } from "./env";
 import { WasmEngine } from "./wasm-engine";
 import { objectToPackType, writeTypeSizeHeader, typeSizeHeaderLen } from "./packfile-builder";
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
+import { unifiedDiff, isBinary } from "./diff-engine";
+import { toHex } from "./hex";
 
 const decoder = new TextDecoder();
 const MAX_OBJECTS_PER_BATCH = 1000;
@@ -46,6 +55,57 @@ interface WorktreeRequest {
   entries: WorktreeEntry[];
 }
 
+interface DiffPair {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  oldSha?: string;
+  newSha?: string;
+  // R2 location for old blob
+  oldChunkKey?: string;
+  oldOffset?: number;
+  oldLength?: number;
+  oldLooseKey?: string;
+  // R2 location for new blob
+  newChunkKey?: string;
+  newOffset?: number;
+  newLength?: number;
+  newLooseKey?: string;
+}
+
+interface DiffBlobsRequest {
+  repoPath: string;
+  pairs: DiffPair[];
+}
+
+interface GrepEntry {
+  sha: string;
+  path: string;
+  chunkKey?: string;
+  offset?: number;
+  length?: number;
+  looseKey?: string;
+}
+
+interface GrepRequest {
+  repoPath: string;
+  pattern: string;
+  entries: GrepEntry[];
+  contextLines?: number;
+}
+
+interface TreeWalkEntry {
+  sha: string;
+  chunkKey?: string;
+  offset?: number;
+  length?: number;
+  looseKey?: string;
+}
+
+interface TreeWalkRequest {
+  repoPath: string;
+  trees: TreeWalkEntry[];
+}
+
 function nameToType(name: string): number {
   switch (name) {
     case "blob": return OBJ_BLOB;
@@ -72,6 +132,12 @@ export class PackWorkerDO extends DurableObject<Env> {
         return this.handleBuildSegment(request);
       case "write-worktree":
         return this.handleWriteWorktree(request);
+      case "diff-blobs":
+        return this.handleDiffBlobs(request);
+      case "grep-blobs":
+        return this.handleGrepBlobs(request);
+      case "walk-trees":
+        return this.handleWalkTrees(request);
       default:
         return new Response("Unknown action\n", { status: 400 });
     }
@@ -264,6 +330,238 @@ export class PackWorkerDO extends DurableObject<Env> {
     return Response.json({ written });
   }
 
+  // === diff-blobs: read blob pairs from R2, compute unified diffs ===
+
+  private async handleDiffBlobs(request: Request): Promise<Response> {
+    const body = await request.json() as DiffBlobsRequest;
+    const { repoPath, pairs } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
+    if (!pairs || pairs.length === 0) {
+      return Response.json({ diffs: [] });
+    }
+    if (pairs.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many pairs\n", { status: 400 });
+    }
+
+    // Validate key scope
+    const repoPrefix = repoPath + "/";
+    for (const p of pairs) {
+      if (p.oldChunkKey && !p.oldChunkKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+      if (p.newChunkKey && !p.newChunkKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+      if (p.oldLooseKey && !p.oldLooseKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+      if (p.newLooseKey && !p.newLooseKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+    }
+
+    const wasm = await this.getWasm();
+    const r2 = this.env.OBJECTS;
+
+    // Collect all unique chunk keys to fetch
+    const allChunkKeys = new Set<string>();
+    for (const p of pairs) {
+      if (p.oldChunkKey) allChunkKeys.add(p.oldChunkKey);
+      if (p.newChunkKey) allChunkKeys.add(p.newChunkKey);
+    }
+    const chunkData = await this.fetchChunks(r2, [...allChunkKeys]);
+
+    // Process each pair
+    const diffs: Array<{
+      path: string;
+      status: string;
+      binary?: boolean;
+      patch?: string;
+      oldSize?: number;
+      newSize?: number;
+    }> = [];
+
+    for (const pair of pairs) {
+      const oldBlob = pair.oldSha ? await this.readBlobContent(wasm, r2, chunkData, {
+        chunkKey: pair.oldChunkKey, offset: pair.oldOffset,
+        length: pair.oldLength, looseKey: pair.oldLooseKey,
+      }) : null;
+
+      const newBlob = pair.newSha ? await this.readBlobContent(wasm, r2, chunkData, {
+        chunkKey: pair.newChunkKey, offset: pair.newOffset,
+        length: pair.newLength, looseKey: pair.newLooseKey,
+      }) : null;
+
+      const entry: typeof diffs[0] = {
+        path: pair.path,
+        status: pair.status,
+        oldSize: oldBlob?.length,
+        newSize: newBlob?.length,
+      };
+
+      // Check for binary
+      if ((oldBlob && isBinary(oldBlob)) || (newBlob && isBinary(newBlob))) {
+        entry.binary = true;
+      } else {
+        const oldText = oldBlob ? decoder.decode(oldBlob) : "";
+        const newText = newBlob ? decoder.decode(newBlob) : "";
+        entry.patch = unifiedDiff(oldText, newText, pair.path, pair.path);
+      }
+
+      diffs.push(entry);
+    }
+
+    return Response.json({ diffs });
+  }
+
+  // === grep-blobs: read blobs from R2, search content, return matches ===
+
+  private async handleGrepBlobs(request: Request): Promise<Response> {
+    const body = await request.json() as GrepRequest;
+    const { repoPath, pattern, entries, contextLines = 0 } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
+    if (!pattern || typeof pattern !== "string") {
+      return new Response("Missing pattern\n", { status: 400 });
+    }
+    if (!entries || entries.length === 0) {
+      return Response.json({ matches: [] });
+    }
+    if (entries.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many entries\n", { status: 400 });
+    }
+
+    // Validate key scope
+    const repoPrefix = repoPath + "/";
+    for (const e of entries) {
+      if (e.chunkKey && !e.chunkKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+      if (e.looseKey && !e.looseKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+    }
+
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, "gm");
+    } catch {
+      return new Response("Invalid regex pattern\n", { status: 400 });
+    }
+
+    const wasm = await this.getWasm();
+    const r2 = this.env.OBJECTS;
+
+    // Fetch all chunks
+    const allChunkKeys = new Set<string>();
+    for (const e of entries) {
+      if (e.chunkKey) allChunkKeys.add(e.chunkKey);
+    }
+    const chunkData = await this.fetchChunks(r2, [...allChunkKeys]);
+
+    const matches: Array<{
+      path: string;
+      sha: string;
+      lines: Array<{ lineNumber: number; text: string; isMatch: boolean }>;
+    }> = [];
+
+    const clampedContext = Math.min(contextLines, 10);
+
+    for (const entry of entries) {
+      const content = await this.readBlobContent(wasm, r2, chunkData, entry);
+      if (!content || isBinary(content)) continue;
+
+      const text = decoder.decode(content);
+      const lines = text.split("\n");
+      const matchedLineNums = new Set<number>();
+
+      // Find all matching lines
+      for (let i = 0; i < lines.length; i++) {
+        regex.lastIndex = 0;
+        if (regex.test(lines[i])) {
+          matchedLineNums.add(i);
+        }
+      }
+
+      if (matchedLineNums.size === 0) continue;
+
+      // Collect matched lines + context
+      const outputLines: Array<{ lineNumber: number; text: string; isMatch: boolean }> = [];
+      const includedLines = new Set<number>();
+      for (const ln of matchedLineNums) {
+        for (let c = Math.max(0, ln - clampedContext); c <= Math.min(lines.length - 1, ln + clampedContext); c++) {
+          if (!includedLines.has(c)) {
+            includedLines.add(c);
+            outputLines.push({ lineNumber: c + 1, text: lines[c], isMatch: matchedLineNums.has(c) });
+          }
+        }
+      }
+      outputLines.sort((a, b) => a.lineNumber - b.lineNumber);
+      matches.push({ path: entry.path, sha: entry.sha, lines: outputLines });
+    }
+
+    return Response.json({ matches });
+  }
+
+  // === walk-trees: read tree objects, parse entries, return child SHAs ===
+
+  private async handleWalkTrees(request: Request): Promise<Response> {
+    const body = await request.json() as TreeWalkRequest;
+    const { repoPath, trees } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
+    if (!trees || trees.length === 0) {
+      return Response.json({ results: [] });
+    }
+    if (trees.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many trees\n", { status: 400 });
+    }
+
+    const repoPrefix = repoPath + "/";
+    for (const t of trees) {
+      if (t.chunkKey && !t.chunkKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+      if (t.looseKey && !t.looseKey.startsWith(repoPrefix)) return new Response("Invalid key scope\n", { status: 400 });
+    }
+
+    const wasm = await this.getWasm();
+    const r2 = this.env.OBJECTS;
+
+    const allChunkKeys = new Set<string>();
+    for (const t of trees) {
+      if (t.chunkKey) allChunkKeys.add(t.chunkKey);
+    }
+    const chunkData = await this.fetchChunks(r2, [...allChunkKeys]);
+
+    const results: Array<{
+      sha: string;
+      entries: Array<{ mode: string; name: string; sha: string }>;
+    }> = [];
+
+    for (const tree of trees) {
+      const raw = await this.readRawObject(wasm, r2, chunkData, tree);
+      if (!raw) continue;
+
+      // Parse "tree size\0" header
+      const nullIdx = raw.indexOf(0x00);
+      if (nullIdx === -1) continue;
+      const typeStr = decoder.decode(raw.subarray(0, raw.indexOf(0x20)));
+      if (typeStr !== "tree") continue;
+
+      const data = raw.subarray(nullIdx + 1);
+      const entries: Array<{ mode: string; name: string; sha: string }> = [];
+      let pos = 0;
+
+      while (pos < data.length) {
+        const spaceIdx = data.indexOf(0x20, pos);
+        if (spaceIdx === -1) break;
+        const nullPos = data.indexOf(0x00, spaceIdx + 1);
+        if (nullPos === -1 || nullPos + 21 > data.length) break;
+
+        const mode = decoder.decode(data.subarray(pos, spaceIdx));
+        const name = decoder.decode(data.subarray(spaceIdx + 1, nullPos));
+        const sha = toHex(data.subarray(nullPos + 1, nullPos + 21));
+        entries.push({ mode, name, sha });
+        pos = nullPos + 21;
+      }
+
+      results.push({ sha: tree.sha, entries });
+    }
+
+    return Response.json({ results });
+  }
+
   // === Shared utilities ===
 
   private validateKeyScope(repoPath: string, objects: ObjectDescriptor[]): boolean {
@@ -292,6 +590,44 @@ export class PackWorkerDO extends DurableObject<Env> {
       }
     }
     return chunkData;
+  }
+
+  /** Read a blob from R2, decompress, return raw content (no git header). */
+  private async readBlobContent(
+    wasm: WasmEngine,
+    r2: R2Bucket,
+    chunkData: Map<string, Uint8Array>,
+    loc: { chunkKey?: string; offset?: number; length?: number; looseKey?: string },
+  ): Promise<Uint8Array | null> {
+    let compressed: Uint8Array | null = null;
+    if (loc.chunkKey && loc.offset !== undefined && loc.length !== undefined) {
+      const chunk = chunkData.get(loc.chunkKey);
+      if (chunk) compressed = chunk.subarray(loc.offset, loc.offset + loc.length);
+    } else if (loc.looseKey) {
+      const obj = await r2.get(loc.looseKey);
+      if (obj) compressed = new Uint8Array(await obj.arrayBuffer());
+    }
+    if (!compressed) return null;
+    return this.decompressBlob(wasm, compressed);
+  }
+
+  /** Read a raw git object from R2 (full "type size\0content" form). */
+  private async readRawObject(
+    wasm: WasmEngine,
+    r2: R2Bucket,
+    chunkData: Map<string, Uint8Array>,
+    loc: { chunkKey?: string; offset?: number; length?: number; looseKey?: string },
+  ): Promise<Uint8Array | null> {
+    let compressed: Uint8Array | null = null;
+    if (loc.chunkKey && loc.offset !== undefined && loc.length !== undefined) {
+      const chunk = chunkData.get(loc.chunkKey);
+      if (chunk) compressed = chunk.subarray(loc.offset, loc.offset + loc.length);
+    } else if (loc.looseKey) {
+      const obj = await r2.get(loc.looseKey);
+      if (obj) compressed = new Uint8Array(await obj.arrayBuffer());
+    }
+    if (!compressed) return null;
+    return this.inflateObject(wasm, compressed);
   }
 
   /** Decompress a git object, extract blob content (for worktree writes). */
