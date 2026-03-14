@@ -83,23 +83,26 @@ const resp = await worker.fetch(buildRequest);
 
 | Property | Value |
 |----------|-------|
-| Pool size | 20 slots (configurable via `FANOUT_POOL_SIZE`) |
-| Batch size | 500 objects per worker (configurable via `FANOUT_BATCH_SIZE`) |
-| Threshold | 200 objects minimum to activate fan-out |
-| Naming | `pack-slot-{0..19}` |
+| Pool size | Dynamic — scales with batch count, capped at configurable max (default 20, hard max 100) |
+| Configuration | `POOL_MAX_SLOTS` env var, or `PoolConfig.maxSlots` in code |
+| Batch size | 100–500 objects per worker depending on operation |
+| Threshold | 200 (packfile/worktree), 10 (diff), 50 (grep) |
+| Naming | `pack-slot-{0..N}` |
 | Idle cost | $0 (hibernated DOs are free) |
 | Reuse | Same slots across requests (warm WASM, warm R2 connections) |
-| Fallback | When `PACK_WORKER` binding is absent, local assembly |
+| Fallback | When `PACK_WORKER` binding is absent, local processing |
 
 ### Which operations benefit
 
 | Operation | Fan-out? | Why |
 |-----------|----------|-----|
 | **Clone/fetch** (packfile build) | Yes | Memory-intensive: read + compress + assemble all objects |
+| **Diff with content** | Yes | Read blob pairs from R2, compute unified diffs at the edge |
+| **Grep** | Yes | Read blobs from R2, regex search with context at the edge |
+| **Worktree materialization** | Yes | Read blobs and write raw content to worktree paths |
+| **Tree walks** | Yes | Parse tree objects and return child SHAs for BFS |
 | **Push** (packfile unpack) | No | Already streams with 200-object flush batches |
-| **Diff / merge** (tree walks) | Optional | BFS walks are lightweight; fan out only for very deep trees |
 | **Log / stats** | No | SQLite queries, no large buffers |
-| **Worktree materialization** | Optional | Already uses `ctx.waitUntil()` with batched R2 PUTs |
 
 ### Coordination
 
@@ -109,11 +112,13 @@ The `buildPackfile` function in `src/packfile-builder.ts` handles the decision a
 export async function buildPackfile(
   engine: GitEngine,
   objectShas: string[],
-  packWorker?: DurableObjectNamespace
+  packWorker?: DurableObjectNamespace,
+  poolConfig?: PoolConfig
 ): Promise<Uint8Array> {
+  const maxSlots = poolConfig?.maxSlots;
   // Fan out only when binding exists AND enough objects to justify it
   if (packWorker && objectShas.length > FANOUT_THRESHOLD) {
-    return buildPackfileFanout(engine, objectShas, packWorker);
+    return buildPackfileFanout(engine, objectShas, packWorker, maxSlots);
   }
   // Otherwise: local assembly (fast for small repos)
   // ...

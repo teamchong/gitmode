@@ -16,6 +16,7 @@ import type { GitEngine } from "./git-engine";
 import { OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
 import { buildPackfile } from "./packfile-builder";
+import type { PoolConfig } from "./compute-pool";
 import { toHex } from "./hex";
 
 const decoder = new TextDecoder();
@@ -23,7 +24,8 @@ const decoder = new TextDecoder();
 export async function handleUploadPack(
   engine: GitEngine,
   body: Uint8Array,
-  packWorker?: DurableObjectNamespace
+  packWorker?: DurableObjectNamespace,
+  poolConfig?: PoolConfig,
 ): Promise<Response> {
   // Parse wants and haves from client request
   const wants: string[] = [];
@@ -81,7 +83,7 @@ export async function handleUploadPack(
   const needed = await collectObjects(engine, wants, haves);
 
   // Build packfile — reads objects in batches to bound memory
-  const packData = await buildPackfile(engine, needed, packWorker);
+  const packData = await buildPackfile(engine, needed, packWorker, poolConfig);
 
   // Response: ACK (if common commits found) or NAK + packfile in sideband-64k
   const ackOrNak = commonSha

@@ -21,7 +21,7 @@ import { GitEngine, OBJ_TREE, OBJ_BLOB, OBJ_COMMIT } from "./git-engine";
 import type { Env } from "./env";
 import type { ObjectCache } from "./packfile-reader";
 import { toHex } from "./hex";
-import { dispatchToPool, batchForPool } from "./compute-pool";
+import { dispatchToPool, batchForPool, type PoolConfig } from "./compute-pool";
 
 const decoder = new TextDecoder();
 
@@ -43,6 +43,7 @@ export async function materializeWorktree(
   commitSha: string,
   oldCommitSha?: string,
   objectCache?: ObjectCache,
+  poolConfig?: PoolConfig,
 ): Promise<void> {
   const newTree = await getTreeSha(engine, commitSha, objectCache);
   const prefix = `${repoPath}/worktrees/${branch}/`;
@@ -99,7 +100,7 @@ export async function materializeWorktree(
   // Fan-out path: dispatch blob writes to compute worker pool
   const pool = env.PACK_WORKER;
   if (pool && newFiles.size > FANOUT_THRESHOLD) {
-    await materializeWorktreeFanout(engine, pool, repoPath, branch, newFiles);
+    await materializeWorktreeFanout(engine, pool, repoPath, branch, newFiles, poolConfig?.maxSlots);
     return;
   }
 
@@ -158,6 +159,7 @@ async function materializeWorktreeFanout(
   repoPath: string,
   branch: string,
   files: Map<string, string>,
+  maxSlots?: number,
 ): Promise<void> {
   // Look up chunk metadata so workers know where to read each blob
   const shas = [...new Set(files.values())];
@@ -186,7 +188,7 @@ async function materializeWorktreeFanout(
     });
   }
 
-  const tasks = batchForPool(worktreeEntries, FANOUT_BATCH_SIZE);
+  const tasks = batchForPool(worktreeEntries, FANOUT_BATCH_SIZE, maxSlots);
 
   await dispatchToPool(pool, tasks, async (worker, entries) => {
     const resp = await worker.fetch("https://worker/worktree", {

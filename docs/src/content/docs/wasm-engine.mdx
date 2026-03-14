@@ -31,7 +31,7 @@ pnpm run build:wasm-all   # Both modules
 
 ## Exports
 
-The WASM module exports 27 functions organized by category:
+The WASM module exports 29 functions organized by category:
 
 ### Memory Management
 
@@ -41,6 +41,8 @@ The WASM module exports 27 functions organized by category:
 | `alloc` | Allocate bytes in WASM heap |
 | `resetHeap` | Reset heap (arena allocator) |
 | `getHeapUsed` | Get current heap usage |
+| `heapSave` | Save heap offset (returns checkpoint) |
+| `heapRestore` | Restore heap to checkpoint (frees allocations after it) |
 
 ### SHA-1
 
@@ -140,3 +142,25 @@ Key build settings:
 ### Zlib via libdeflate
 
 Zlib operations use vendored [libdeflate 1.25](https://github.com/ebiggers/libdeflate) (`wasm/vendor/libdeflate/`), imported via Zig's `@cImport`. This replaced Zig's `std.compress.flate` which crashed on certain inputs. libdeflate is purpose-built for in-memory inflate/deflate and consistently faster than general-purpose zlib implementations.
+
+## Zero-Copy WASM Memory
+
+The JS↔WASM boundary avoids unnecessary copies using two techniques:
+
+### View bytes (subarray, not slice)
+
+`viewBytes()` returns a `Uint8Array` subarray directly into `WebAssembly.Memory` — zero copy. The view is valid until the next WASM alloc, reset, or memory grow. Used in packfile building and compute workers where the deflate result is immediately consumed:
+
+```typescript
+// Zero-copy: deflate result stays in WASM memory
+const compressedView = wasm.zlibDeflateView(content);
+entry.set(compressedView, headerLen); // copies once into final buffer
+```
+
+### Fused pipelines (hashAndDeflate)
+
+`hashAndDeflate()` performs SHA-1 hashing and zlib deflation in a single heap session. Content is written to WASM memory once; the SHA-1 is computed, then the header + content are assembled in WASM memory (using an intra-WASM copy, not a JS roundtrip) and deflated. One `resetHeap()` instead of two, one content write instead of two.
+
+### Heap save/restore
+
+`heapSave()` and `heapRestore()` allow multiple results to coexist in WASM memory without a full `resetHeap()`. This enables pipeline patterns where intermediate results stay in WASM memory and are consumed by the next operation without copying out to JS.

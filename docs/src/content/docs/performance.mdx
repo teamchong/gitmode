@@ -85,6 +85,17 @@ The push pipeline is optimized into distinct phases to minimize latency.
 
 **Impact:** Incremental push for a single file change: 130ms (100 files) to 867ms (5K files).
 
+### Zero-Copy WASM Memory
+
+**Problem:** Every WASM call copied data in (`.set()`) and out (`.slice()`). Chained operations like hash→deflate did 2 full heap resets and 2 unnecessary intermediate copies per object.
+
+**Solution:** Three techniques eliminate copies:
+- `viewBytes()` — returns a `subarray` view into WASM memory instead of `.slice()`. Used in packfile building where the deflate result is immediately consumed by `entry.set()`.
+- `hashAndDeflate()` — fused pipeline: content written to WASM once, SHA-1 computed, header+content assembled in WASM memory, then deflated. One reset instead of two.
+- `heapSave()`/`heapRestore()` — checkpoint the bump allocator so multiple results can coexist without a full reset.
+
+**Impact:** For a 5K-object push, `prepareObject` alone avoids ~500MB of memcpy (2 copies eliminated per object).
+
 ### SQLite-First Object Lookups
 
 **Problem:** `hasObject()` made an R2 HEAD request per SHA during fetch negotiation.

@@ -85,6 +85,12 @@ Returns the file content at the given ref and path:
 { "content": "console.log('hi')", "size": 17 }
 ```
 
+Binary files are returned with base64 encoding:
+
+```json
+{ "content": "iVBOR...", "size": 1024, "encoding": "base64", "binary": true }
+```
+
 ### List Files
 
 ```http
@@ -345,6 +351,69 @@ Compares two refs. Both `a`/`b` and `from`/`to` parameter names are accepted. If
 }
 ```
 
+### Inline Diff Content
+
+Add `&content=true` to include unified diff patches and size information:
+
+```http
+GET /api/repos/:owner/:repo/diff?a=<ref>&b=<ref>&content=true
+```
+
+```json
+{
+  "entries": [
+    {
+      "path": "main.ts",
+      "status": "modified",
+      "oldSha": "ghi...",
+      "newSha": "jkl...",
+      "oldSize": 120,
+      "newSize": 145,
+      "patch": "--- a/main.ts\n+++ b/main.ts\n@@ -1,3 +1,5 @@\n..."
+    },
+    {
+      "path": "image.png",
+      "status": "modified",
+      "oldSha": "mno...",
+      "newSha": "pqr...",
+      "binary": true
+    }
+  ]
+}
+```
+
+Binary files are detected automatically (null byte in first 8KB) and flagged with `"binary": true` instead of a patch. When `PACK_WORKER` is configured, diff computation fans out to the compute pool for large changesets.
+
+## Grep
+
+```http
+GET /api/repos/:owner/:repo/grep?pattern=<regex>&ref=<ref>&context=<n>
+```
+
+Searches blob content at the given ref using a regular expression. Returns matching lines with surrounding context.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pattern` (or `q`) | required | Regex pattern to search for |
+| `ref` | `HEAD` | Branch, tag, or commit SHA |
+| `context` | `2` | Lines of context before/after each match (max 10) |
+
+```json
+{
+  "matches": [
+    {
+      "path": "src/index.ts",
+      "lines": [
+        { "num": 5, "text": "import { createHandler } from 'gitmode';", "match": true },
+        { "num": 6, "text": "", "match": false }
+      ]
+    }
+  ]
+}
+```
+
+When `PACK_WORKER` is configured, grep fans out to the compute pool for repos with many files.
+
 ## Merge
 
 ```http
@@ -480,4 +549,10 @@ Reads a raw git object:
 
 ```json
 { "type": "commit", "size": 234, "content": "tree abc...\nparent ..." }
+```
+
+For blob objects with binary content (null byte in first 8KB), the response includes base64 encoding:
+
+```json
+{ "type": "blob", "size": 1024, "content": "iVBOR...", "encoding": "base64", "binary": true }
 ```

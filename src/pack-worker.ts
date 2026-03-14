@@ -663,21 +663,22 @@ export class PackWorkerDO extends DurableObject<Env> {
     const content = raw.subarray(nullIdx + 1);
 
     // Re-compress raw content for packfile (different from git object compression)
-    let packCompressed: Uint8Array;
+    let compressedView: Uint8Array;
     try {
-      packCompressed = wasm.zlibDeflate(content);
+      // Zero-copy view — consumed immediately by entry.set() below
+      compressedView = wasm.zlibDeflateView(content);
     } catch (err) {
       console.error(`pack-worker: deflate failed (${content.length} bytes): ${err}`);
       return null;
     }
-    if (packCompressed.length === 0) return null;
+    if (compressedView.length === 0) return null;
 
     // Build packfile entry: type/size header + compressed content
     const packType = objectToPackType(type);
     const headerLen = typeSizeHeaderLen(content.length);
-    const entry = new Uint8Array(headerLen + packCompressed.length);
+    const entry = new Uint8Array(headerLen + compressedView.length);
     writeTypeSizeHeader(entry, 0, packType, content.length);
-    entry.set(packCompressed, headerLen);
+    entry.set(compressedView, headerLen);  // copies from WASM view into entry
     return entry;
   }
 

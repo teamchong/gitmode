@@ -7,4 +7,6 @@ export interface Env {
   OBJECTS: R2Bucket;
   REPO_STORE: DurableObjectNamespace;
   PACK_WORKER?: DurableObjectNamespace;
+  /** Max compute pool slots (default 20). Set via wrangler vars or secrets. */
+  POOL_MAX_SLOTS?: string;
 }

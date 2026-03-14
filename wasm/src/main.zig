@@ -82,6 +82,14 @@ export fn getHeapUsed() usize {
     return heap.offset;
 }
 
+export fn heapSave() usize {
+    return heap.offset;
+}
+
+export fn heapRestore(offset: usize) void {
+    heap.offset = offset;
+}
+
 // ============================================================
 // SHA-1 hashing (SIMD-accelerated)
 // ============================================================

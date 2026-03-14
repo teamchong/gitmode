@@ -2,7 +2,7 @@
   {
     "name": "root",
     "reaches": [
-      "e_memory", "e_alloc", "e_resetHeap", "e_getHeapUsed",
+      "e_memory", "e_alloc", "e_resetHeap", "e_getHeapUsed", "e_heapSave", "e_heapRestore",
       "e_sha1_hash", "e_sha1_hash_object",
       "e_zlib_inflate", "e_zlib_inflate_tracked", "e_zlib_deflate",
       "e_parse_object_header", "e_serialize_object", "e_parse_tree",
@@ -20,6 +20,8 @@
   { "name": "e_alloc", "export": "alloc" },
   { "name": "e_resetHeap", "export": "resetHeap" },
   { "name": "e_getHeapUsed", "export": "getHeapUsed" },
+  { "name": "e_heapSave", "export": "heapSave" },
+  { "name": "e_heapRestore", "export": "heapRestore" },
   { "name": "e_sha1_hash", "export": "sha1_hash" },
   { "name": "e_sha1_hash_object", "export": "sha1_hash_object" },
   { "name": "e_zlib_inflate", "export": "zlib_inflate" },

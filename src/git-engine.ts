@@ -143,22 +143,19 @@ export class GitEngine {
     return sha1Hex;
   }
 
-  /** Prepare an object for storage (hash + compress) without writing to R2. */
+  /** Prepare an object for storage (hash + compress) without writing to R2.
+   *  Uses hashAndDeflate for zero-copy: content written to WASM memory once,
+   *  SHA-1 computed, then header+content deflated — no intermediate JS copies. */
   prepareObject(
     wasm: WasmEngine,
     type: number,
     content: Uint8Array,
   ): { sha1Hex: string; compressed: Uint8Array } {
-    const digest = wasm.hashObject(type, content);
-    const sha1Hex = toHex(digest);
     const header = encoder.encode(
       `${typeToName(type)} ${content.length}\0`
     );
-    const full = new Uint8Array(header.length + content.length);
-    full.set(header);
-    full.set(content, header.length);
-    const compressed = wasm.zlibDeflate(full);
-    return { sha1Hex, compressed };
+    const result = wasm.hashAndDeflate(type, content, header);
+    return { sha1Hex: toHex(result.sha1), compressed: result.compressed };
   }
 
   /** Batch write multiple objects to R2, bundled into ~2MB chunks with SQLite index. */

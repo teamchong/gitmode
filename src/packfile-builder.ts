@@ -10,7 +10,7 @@
 
 import type { GitEngine } from "./git-engine";
 import { OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
-import { dispatchToPool, batchForPool } from "./compute-pool";
+import { dispatchToPool, batchForPool, type PoolConfig } from "./compute-pool";
 
 const PACK_SIGNATURE = new Uint8Array([0x50, 0x41, 0x43, 0x4b]); // "PACK"
 
@@ -34,11 +34,12 @@ export function objectToPackType(objType: number): number {
 export async function buildPackfile(
   engine: GitEngine,
   objectShas: string[],
-  packWorker?: DurableObjectNamespace
+  packWorker?: DurableObjectNamespace,
+  poolConfig?: PoolConfig,
 ): Promise<Uint8Array> {
-  // Fan-out path: distribute to PackWorkerDO pool
+  // Fan-out path: distribute to compute pool
   if (packWorker && objectShas.length > FANOUT_THRESHOLD) {
-    return buildPackfileFanout(engine, objectShas, packWorker);
+    return buildPackfileFanout(engine, objectShas, packWorker, poolConfig?.maxSlots);
   }
 
   const wasm = await engine.getWasmPublic();
@@ -70,23 +71,24 @@ export async function buildPackfile(
         continue;
       }
 
-      let compressed: Uint8Array;
+      let compressedView: Uint8Array;
       try {
-        compressed = wasm.zlibDeflate(obj.content);
+        // Zero-copy view — valid until next WASM call, consumed immediately by entry.set()
+        compressedView = wasm.zlibDeflateView(obj.content);
       } catch {
         console.error(`buildPackfile: deflate crashed for ${sha1} (${obj.content.length} bytes)`);
         continue;
       }
-      if (compressed.length === 0) {
+      if (compressedView.length === 0) {
         console.error(`buildPackfile: deflate returned 0 bytes for ${sha1} (${obj.content.length} bytes)`);
         continue;
       }
 
       const packType = objectToPackType(obj.type);
       const headerLen = typeSizeHeaderLen(obj.content.length);
-      const entry = new Uint8Array(headerLen + compressed.length);
+      const entry = new Uint8Array(headerLen + compressedView.length);
       writeTypeSizeHeader(entry, 0, packType, obj.content.length);
-      entry.set(compressed, headerLen);
+      entry.set(compressedView, headerLen);  // copies from WASM view into entry
       chunks.push(entry);
       totalSize += entry.length;
       objectCount++;
@@ -160,11 +162,12 @@ export function typeSizeHeaderLen(size: number): number {
 async function buildPackfileFanout(
   engine: GitEngine,
   objectShas: string[],
-  packWorker: DurableObjectNamespace
+  packWorker: DurableObjectNamespace,
+  maxSlots?: number,
 ): Promise<Uint8Array> {
   // Look up R2 chunk metadata for all SHAs so workers know where to read
   const descriptors = engine.lookupChunkMeta(objectShas);
-  const tasks = batchForPool(descriptors, FANOUT_BATCH_SIZE);
+  const tasks = batchForPool(descriptors, FANOUT_BATCH_SIZE, maxSlots);
 
   // Dispatch to compute pool — each worker reads from R2 and builds a segment
   const results = await dispatchToPool(

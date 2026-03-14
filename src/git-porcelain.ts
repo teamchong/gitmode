@@ -6,7 +6,7 @@
 import { GitEngine, OBJ_BLOB, OBJ_TREE, OBJ_COMMIT, OBJ_TAG } from "./git-engine";
 import { toHex } from "./hex";
 import { unifiedDiff, isBinary } from "./diff-engine";
-import { dispatchToPool, batchForPool } from "./compute-pool";
+import { dispatchToPool, batchForPool, type PoolConfig } from "./compute-pool";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -530,6 +530,7 @@ export class GitPorcelain {
     refA: string,
     refB?: string,
     packWorker?: DurableObjectNamespace,
+    poolConfig?: PoolConfig,
   ): Promise<DiffEntry[]> {
     // Get structural diff first (just paths + SHAs)
     const entries = await this.diff(refA, refB);
@@ -537,7 +538,7 @@ export class GitPorcelain {
 
     // Fan-out path: dispatch blob reads + diff computation to workers
     if (packWorker && entries.length > 10) {
-      return this.diffWithContentFanout(entries, packWorker);
+      return this.diffWithContentFanout(entries, packWorker, poolConfig?.maxSlots);
     }
 
     // Local path: read blobs and diff in the coordinator
@@ -574,6 +575,7 @@ export class GitPorcelain {
   private async diffWithContentFanout(
     entries: DiffEntry[],
     packWorker: DurableObjectNamespace,
+    maxSlots?: number,
   ): Promise<DiffEntry[]> {
     // Look up chunk metadata for all blob SHAs
     const allShas = new Set<string>();
@@ -604,7 +606,7 @@ export class GitPorcelain {
       };
     });
 
-    const tasks = batchForPool(pairs, 100); // smaller batches — diff is compute-heavy
+    const tasks = batchForPool(pairs, 100, maxSlots); // smaller batches — diff is compute-heavy
 
     const results = await dispatchToPool(packWorker, tasks, async (worker, batch) => {
       const resp = await worker.fetch("https://worker/diff", {
@@ -649,6 +651,7 @@ export class GitPorcelain {
     pattern: string,
     packWorker?: DurableObjectNamespace,
     contextLines = 2,
+    poolConfig?: PoolConfig,
   ): Promise<Array<{
     path: string;
     sha: string;
@@ -685,7 +688,7 @@ export class GitPorcelain {
 
     // Fan-out path
     if (packWorker && grepEntries.length > 50) {
-      const tasks = batchForPool(grepEntries, 200);
+      const tasks = batchForPool(grepEntries, 200, poolConfig?.maxSlots);
       const results = await dispatchToPool(packWorker, tasks, async (worker, batch) => {
         const resp = await worker.fetch("https://worker/grep", {
           method: "POST",

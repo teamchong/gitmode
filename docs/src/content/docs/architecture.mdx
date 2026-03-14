@@ -13,7 +13,7 @@ gitmode is an npm package (`import { createHandler } from "gitmode"`) that runs 
 |-----------|------|
 | **Worker** | HTTP router via `createHandler()` — matches git protocol and REST API routes, forwards to Durable Object |
 | **RepoStore DO** | Per-repo Durable Object with embedded SQLite for refs, HEAD, metadata, commit index |
-| **PackWorkerDO** | Fan-out pool for parallel packfile assembly — each worker reads/compresses a batch of objects independently |
+| **PackWorkerDO** | Edge compute pool — each worker reads data from R2 and processes locally (packfile assembly, diff, grep, worktree, tree walks) |
 | **R2** | Object storage for git objects bundled into ~2MB chunks, plus materialized worktree files |
 | **Zig WASM** | Two modules: **server** (865KB, full git + libgit2) and **client** (83KB, SHA-1/zlib/delta only) |
 | **SSH Proxy** | Node.js SSH-to-HTTP proxy for `git clone ssh://...` support (development only) |
@@ -27,7 +27,7 @@ gitmode is an npm package (`import { createHandler } from "gitmode"`) that runs 
    - For git protocol: delegates to `handleInfoRefs`, `handleUploadPack`, or `handleReceivePack`
    - For REST API: delegates to `GitPorcelain` methods via `handleApiAction`
 5. **GitEngine** reads/writes objects from R2 and refs from SQLite
-6. **PackWorkerDO pool** (clone/fetch only): RepoStore fans out packfile assembly to a pool of up to 20 workers. Each worker reads its objects from R2, decompresses, re-compresses for packfile format, and returns a binary segment. Activated when `PACK_WORKER` binding is configured and object count exceeds 200.
+6. **PackWorkerDO pool** (compute-intensive operations): RepoStore fans out work to a dynamic pool of compute workers. Each worker reads data from R2 and processes locally — packfile assembly, unified diffs, regex grep, worktree materialization, or tree walks. Pool size scales with workload, capped at a configurable max (default 20). Activated when `PACK_WORKER` binding is configured and workload exceeds operation-specific thresholds.
 7. **Zig WASM** handles binary operations: SHA-1 hashing, zlib, packfile parsing, delta encoding
 
 ## Data Model

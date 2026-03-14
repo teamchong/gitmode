@@ -14,6 +14,7 @@ import { handleUploadPack } from "./upload-pack";
 import { handleReceivePack } from "./receive-pack";
 import { handleInfoRefs } from "./info-refs";
 import { GitPorcelain } from "./git-porcelain";
+import { resolveMaxSlots, type PoolConfig } from "./compute-pool";
 
 const decoder = new TextDecoder();
 
@@ -139,6 +140,7 @@ export class RepoStore extends DurableObject<Env> {
     const repoPath = request.headers.get("x-repo-path") ?? "";
 
     const engine = new GitEngine(this.env.OBJECTS, repoPath, this.sql);
+    const poolConfig: PoolConfig = { maxSlots: resolveMaxSlots(this.env.POOL_MAX_SLOTS) };
 
     switch (action) {
       case "info-refs": {
@@ -153,7 +155,7 @@ export class RepoStore extends DurableObject<Env> {
           return new Response("Request too large\n", { status: 413 });
         }
         const body = new Uint8Array(await request.arrayBuffer());
-        return handleUploadPack(engine, body, this.env.PACK_WORKER);
+        return handleUploadPack(engine, body, this.env.PACK_WORKER, poolConfig);
       }
 
       case "receive-pack": {
@@ -248,7 +250,7 @@ export class RepoStore extends DurableObject<Env> {
         const url = new URL(request.url);
         const apiAction = request.headers.get("x-api-action") ?? "";
         try {
-          return await handleApiAction(porcelain, engine, apiAction, request, url, this.env);
+          return await handleApiAction(porcelain, engine, apiAction, request, url, this.env, poolConfig);
         } catch (err) {
           const raw = err instanceof Error ? err.message : String(err);
           // Only return known user-facing errors; hide internal details
@@ -270,6 +272,7 @@ async function handleApiAction(
   request: Request,
   url: URL,
   env: Env,
+  poolConfig: PoolConfig,
 ): Promise<Response> {
   switch (action) {
     // --- init ---
@@ -435,7 +438,7 @@ async function handleApiAction(
       const refB = url.searchParams.get("b") ?? url.searchParams.get("to") ?? undefined;
       const withContent = url.searchParams.get("content") === "true";
       const entries = withContent
-        ? await porcelain.diffWithContent(refA, refB, env.PACK_WORKER)
+        ? await porcelain.diffWithContent(refA, refB, env.PACK_WORKER, poolConfig)
         : await porcelain.diff(refA, refB);
       return Response.json({ entries });
     }
@@ -446,7 +449,7 @@ async function handleApiAction(
       const pattern = url.searchParams.get("pattern") ?? url.searchParams.get("q") ?? "";
       if (!pattern) return Response.json({ error: "Missing pattern" }, { status: 400 });
       const contextLines = Math.min(parseInt(url.searchParams.get("context") ?? "2", 10) || 2, 10);
-      const matches = await porcelain.grep(ref, pattern, env.PACK_WORKER, contextLines);
+      const matches = await porcelain.grep(ref, pattern, env.PACK_WORKER, contextLines, poolConfig);
       return Response.json({ matches });
     }
 

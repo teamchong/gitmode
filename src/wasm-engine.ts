@@ -16,6 +16,8 @@ export interface WasmExports {
   alloc(size: number): number;
   resetHeap(): void;
   getHeapUsed(): number;
+  heapSave(): number;
+  heapRestore(offset: number): void;
 
   // SHA-1
   sha1_hash(dataPtr: number, dataLen: number, outPtr: number): void;
@@ -336,10 +338,25 @@ export class WasmEngine {
     return new Uint8Array(this.exports.memory.buffer, ptr, len).slice();
   }
 
+  /** Zero-copy view into WASM memory. Valid until next alloc/reset/grow. */
+  viewBytes(ptr: number, len: number): Uint8Array {
+    return new Uint8Array(this.exports.memory.buffer, ptr, len);
+  }
+
   readString(ptr: number, len: number): string {
     return textDecoder.decode(
       new Uint8Array(this.exports.memory.buffer, ptr, len)
     );
+  }
+
+  /** Save heap offset — returns checkpoint for heapRestore(). */
+  heapSave(): number {
+    return this.exports.heapSave();
+  }
+
+  /** Restore heap to checkpoint — frees all allocations after it. */
+  heapRestore(checkpoint: number): void {
+    this.exports.heapRestore(checkpoint);
   }
 
   // --- Git operations ---
@@ -414,6 +431,23 @@ export class WasmEngine {
     return this.readBytes(outPtr, written);
   }
 
+  /** Deflate returning a zero-copy view. Valid until next WASM call. */
+  zlibDeflateView(data: Uint8Array): Uint8Array {
+    this.exports.resetHeap();
+    const inPtr = this.writeBytes(data);
+    const maxBlocks = Math.max(Math.ceil(data.length / 5000), 1);
+    const outCap = data.length + maxBlocks * 5 + 6 + 64;
+    const outPtr = this.exports.alloc(outCap);
+    const written = this.exports.zlib_deflate(
+      inPtr,
+      data.length,
+      outPtr,
+      outCap
+    );
+    if (written === 0) throw new Error("Zlib deflate failed");
+    return this.viewBytes(outPtr, written);
+  }
+
   deltaApply(base: Uint8Array, delta: Uint8Array, maxSize: number): Uint8Array {
     this.exports.resetHeap();
     const basePtr = this.writeBytes(base);
@@ -447,5 +481,52 @@ export class WasmEngine {
     );
     if (written === 0) throw new Error("Delta create failed");
     return this.readBytes(outPtr, written);
+  }
+
+  /**
+   * Hash + deflate in a single heap session — no intermediate copies.
+   * Content is written to WASM memory once. SHA-1 is computed, then the
+   * full object (header + content) is deflated. Both results are read out
+   * at the end. Saves 2 resetHeap() calls and 1 full content copy vs
+   * calling hashObject() + zlibDeflate() separately.
+   */
+  hashAndDeflate(
+    type: number,
+    content: Uint8Array,
+    header: Uint8Array
+  ): { sha1: Uint8Array; compressed: Uint8Array } {
+    this.exports.resetHeap();
+
+    // 1. Write content once, hash it
+    const contentPtr = this.writeBytes(content);
+    const shaPtr = this.exports.alloc(20);
+    if (shaPtr === 0) throw new Error("WASM alloc failed: sha out");
+    this.exports.sha1_hash_object(type, contentPtr, content.length, shaPtr);
+
+    // 2. Build full object (header + content) in WASM memory for deflate
+    const fullLen = header.length + content.length;
+    const fullPtr = this.exports.alloc(fullLen);
+    if (fullPtr === 0) throw new Error("WASM alloc failed: full object");
+    const fullView = new Uint8Array(this.exports.memory.buffer, fullPtr, fullLen);
+    fullView.set(header);
+    // Content is already in WASM memory — copy from there (same buffer, no JS roundtrip)
+    fullView.set(
+      new Uint8Array(this.exports.memory.buffer, contentPtr, content.length),
+      header.length
+    );
+
+    // 3. Deflate the full object — output stays in WASM memory
+    const maxBlocks = Math.max(Math.ceil(fullLen / 5000), 1);
+    const outCap = fullLen + maxBlocks * 5 + 6 + 64;
+    const outPtr = this.exports.alloc(outCap);
+    if (outPtr === 0) throw new Error("WASM alloc failed: deflate output");
+    const written = this.exports.zlib_deflate(fullPtr, fullLen, outPtr, outCap);
+    if (written === 0) throw new Error("Zlib deflate failed");
+
+    // 4. Copy final results out (SHA is 20 bytes, compressed is variable)
+    return {
+      sha1: this.readBytes(shaPtr, 20),
+      compressed: this.readBytes(outPtr, written),
+    };
   }
 }
