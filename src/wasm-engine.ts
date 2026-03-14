@@ -228,11 +228,58 @@ function createWasiShims() {
   };
 }
 
+// Pre-allocated scratch layout (allocated once at init, reused every call):
+//   [sha_out: 20] [scalar_out: 8] [io_buf: IO_BUF_SIZE]
+// io_buf is used for both input and output of variable-length data.
+// For operations that need separate in/out, we split io_buf in half.
+const SHA_OUT_SIZE = 20;
+const SCALAR_OUT_SIZE = 8;
+const IO_BUF_SIZE = 8 * 1024 * 1024; // 8MB — fits most git objects
+const SCRATCH_SIZE = SHA_OUT_SIZE + SCALAR_OUT_SIZE + IO_BUF_SIZE;
+
 export class WasmEngine {
   readonly exports: WasmExports;
 
+  // Pre-allocated scratch region — allocated once, never freed
+  private _scratchPtr = 0;
+  private _shaOutPtr = 0;    // 20 bytes for SHA-1 output
+  private _scalarPtr = 0;    // 8 bytes for scalar outputs (consumed count, etc.)
+  private _ioPtr = 0;        // 8MB for variable-length I/O
+  private _ioSize = IO_BUF_SIZE;
+  // Checkpoint after scratch — dynamic allocs start here
+  private _dynamicBase = 0;
+
   private constructor(exports: WasmExports) {
     this.exports = exports;
+  }
+
+  /** Allocate scratch regions. Called once after WASM init. */
+  private _initScratch(): void {
+    this._scratchPtr = this.exports.alloc(SCRATCH_SIZE) as unknown as number;
+    if (!this._scratchPtr) throw new Error("WASM scratch alloc failed");
+    this._shaOutPtr = this._scratchPtr;
+    this._scalarPtr = this._scratchPtr + SHA_OUT_SIZE;
+    this._ioPtr = this._scratchPtr + SHA_OUT_SIZE + SCALAR_OUT_SIZE;
+    // Save checkpoint — resetDynamic() restores to here (scratch preserved)
+    this._dynamicBase = this.exports.heapSave();
+  }
+
+  /** Reset only the dynamic region (preserves scratch). */
+  private _resetDynamic(): void {
+    this.exports.heapRestore(this._dynamicBase);
+  }
+
+  /** Write data directly into the pre-allocated I/O buffer. No alloc call. */
+  writeToScratch(data: Uint8Array): number {
+    if (data.length > this._ioSize) {
+      // Fallback: data too large for scratch, use dynamic alloc
+      const ptr = this.exports.alloc(data.length);
+      if (ptr === 0) throw new Error("WASM alloc failed");
+      new Uint8Array(this.exports.memory.buffer, ptr as unknown as number, data.length).set(data);
+      return ptr as unknown as number;
+    }
+    new Uint8Array(this.exports.memory.buffer, this._ioPtr, data.length).set(data);
+    return this._ioPtr;
   }
 
   static async create(): Promise<WasmEngine> {
@@ -311,7 +358,9 @@ export class WasmEngine {
       (instance.exports as any)._start();
     }
 
-    return new WasmEngine(instance.exports as unknown as WasmExports);
+    const engine = new WasmEngine(instance.exports as unknown as WasmExports);
+    engine._initScratch();
+    return engine;
   }
 
   /** Return current WASM heap usage in bytes. */
@@ -360,162 +409,133 @@ export class WasmEngine {
   }
 
   // --- Git operations ---
+  // All methods use pre-allocated scratch for small I/O.
+  // _resetDynamic() frees only dynamic allocs (scratch survives).
+  // For data that fits in scratch: zero alloc overhead.
+  // For oversized data: falls back to dynamic alloc.
 
   sha1(data: Uint8Array): Uint8Array {
-    this.exports.resetHeap();
-    const dataPtr = this.writeBytes(data);
-    const outPtr = this.exports.alloc(20);
-    this.exports.sha1_hash(dataPtr, data.length, outPtr);
-    return this.readBytes(outPtr, 20);
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(data);
+    this.exports.sha1_hash(inPtr, data.length, this._shaOutPtr);
+    return this.readBytes(this._shaOutPtr, 20);
   }
 
   sha1Hex(data: Uint8Array): string {
-    return toHex(this.sha1(data));
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(data);
+    this.exports.sha1_hash(inPtr, data.length, this._shaOutPtr);
+    return toHex(this.viewBytes(this._shaOutPtr, 20));
   }
 
   hashObject(type: number, content: Uint8Array): Uint8Array {
-    this.exports.resetHeap();
-    const contentPtr = this.writeBytes(content);
-    const outPtr = this.exports.alloc(20);
-    this.exports.sha1_hash_object(type, contentPtr, content.length, outPtr);
-    return this.readBytes(outPtr, 20);
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(content);
+    this.exports.sha1_hash_object(type, inPtr, content.length, this._shaOutPtr);
+    return this.readBytes(this._shaOutPtr, 20);
   }
 
   zlibInflate(compressed: Uint8Array, maxSize: number): Uint8Array {
-    this.exports.resetHeap();
-    const inPtr = this.writeBytes(compressed);
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(compressed);
     const outPtr = this.exports.alloc(maxSize);
     if (outPtr === 0) throw new Error(`WASM alloc failed: inflate output buffer (${maxSize} bytes)`);
-    const written = this.exports.zlib_inflate(
-      inPtr,
-      compressed.length,
-      outPtr,
-      maxSize
-    );
+    const written = this.exports.zlib_inflate(inPtr, compressed.length, outPtr, maxSize);
     if (written === 0) throw new Error("Zlib inflate failed");
+    // Must copy — inflate results are stored in ObjectCache across WASM calls
     return this.readBytes(outPtr, written);
   }
 
   zlibInflateTracked(compressed: Uint8Array, maxSize: number): { data: Uint8Array; consumed: number } {
-    this.exports.resetHeap();
-    const inPtr = this.writeBytes(compressed);
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(compressed);
     const outPtr = this.exports.alloc(maxSize);
     if (outPtr === 0) throw new Error(`WASM alloc failed: inflate output buffer (${maxSize} bytes)`);
-    const consumedPtr = this.exports.alloc(4);
-    if (consumedPtr === 0) throw new Error("WASM alloc failed: consumed tracking (4 bytes)");
     const written = this.exports.zlib_inflate_tracked(
-      inPtr,
-      compressed.length,
-      outPtr,
-      maxSize,
-      consumedPtr
+      inPtr, compressed.length, outPtr, maxSize, this._scalarPtr
     );
-    const consumed = new DataView(this.exports.memory.buffer).getUint32(consumedPtr, true);
+    const consumed = new DataView(this.exports.memory.buffer).getUint32(this._scalarPtr, true);
     return { data: this.readBytes(outPtr, written), consumed };
   }
 
   zlibDeflate(data: Uint8Array): Uint8Array {
-    this.exports.resetHeap();
-    const inPtr = this.writeBytes(data);
-    // libdeflate level 0 uses 5000-byte blocks with 5 bytes overhead each + 6 bytes zlib framing
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(data);
     const maxBlocks = Math.max(Math.ceil(data.length / 5000), 1);
     const outCap = data.length + maxBlocks * 5 + 6 + 64;
     const outPtr = this.exports.alloc(outCap);
-    const written = this.exports.zlib_deflate(
-      inPtr,
-      data.length,
-      outPtr,
-      outCap
-    );
+    const written = this.exports.zlib_deflate(inPtr, data.length, outPtr, outCap);
     if (written === 0) throw new Error("Zlib deflate failed");
     return this.readBytes(outPtr, written);
   }
 
   /** Deflate returning a zero-copy view. Valid until next WASM call. */
   zlibDeflateView(data: Uint8Array): Uint8Array {
-    this.exports.resetHeap();
-    const inPtr = this.writeBytes(data);
+    this._resetDynamic();
+    const inPtr = this.writeToScratch(data);
     const maxBlocks = Math.max(Math.ceil(data.length / 5000), 1);
     const outCap = data.length + maxBlocks * 5 + 6 + 64;
     const outPtr = this.exports.alloc(outCap);
-    const written = this.exports.zlib_deflate(
-      inPtr,
-      data.length,
-      outPtr,
-      outCap
-    );
+    const written = this.exports.zlib_deflate(inPtr, data.length, outPtr, outCap);
     if (written === 0) throw new Error("Zlib deflate failed");
     return this.viewBytes(outPtr, written);
   }
 
   deltaApply(base: Uint8Array, delta: Uint8Array, maxSize: number): Uint8Array {
-    this.exports.resetHeap();
-    const basePtr = this.writeBytes(base);
+    this._resetDynamic();
+    // Two inputs — write base to scratch, delta to dynamic
+    const basePtr = this.writeToScratch(base);
     const deltaPtr = this.writeBytes(delta);
     const outPtr = this.exports.alloc(maxSize);
     const written = this.exports.delta_apply(
-      basePtr,
-      base.length,
-      deltaPtr,
-      delta.length,
-      outPtr,
-      maxSize
+      basePtr, base.length, deltaPtr, delta.length, outPtr, maxSize
     );
     if (written === 0) throw new Error("Delta apply failed");
     return this.readBytes(outPtr, written);
   }
 
   deltaCreate(base: Uint8Array, target: Uint8Array): Uint8Array {
-    this.exports.resetHeap();
-    const basePtr = this.writeBytes(base);
+    this._resetDynamic();
+    const basePtr = this.writeToScratch(base);
     const targetPtr = this.writeBytes(target);
     const outCap = target.length + 256;
     const outPtr = this.exports.alloc(outCap);
     const written = this.exports.delta_create(
-      basePtr,
-      base.length,
-      targetPtr,
-      target.length,
-      outPtr,
-      outCap
+      basePtr, base.length, targetPtr, target.length, outPtr, outCap
     );
     if (written === 0) throw new Error("Delta create failed");
     return this.readBytes(outPtr, written);
   }
 
   /**
-   * Hash + deflate in a single heap session — no intermediate copies.
-   * Content is written to WASM memory once. SHA-1 is computed, then the
-   * full object (header + content) is deflated. Both results are read out
-   * at the end. Saves 2 resetHeap() calls and 1 full content copy vs
-   * calling hashObject() + zlibDeflate() separately.
+   * Hash + deflate in a single session — zero-copy pipeline.
+   * Content written to scratch once. SHA-1 computed to pre-allocated slot.
+   * Header + content assembled in WASM memory (intra-WASM copy). Deflated.
+   * SHA read as view (consumed by toHex). Compressed copied out (goes to R2).
    */
   hashAndDeflate(
     type: number,
     content: Uint8Array,
     header: Uint8Array
   ): { sha1: Uint8Array; compressed: Uint8Array } {
-    this.exports.resetHeap();
+    this._resetDynamic();
 
-    // 1. Write content once, hash it
-    const contentPtr = this.writeBytes(content);
-    const shaPtr = this.exports.alloc(20);
-    if (shaPtr === 0) throw new Error("WASM alloc failed: sha out");
-    this.exports.sha1_hash_object(type, contentPtr, content.length, shaPtr);
+    // 1. Write content to scratch, hash to pre-allocated SHA slot
+    const contentPtr = this.writeToScratch(content);
+    this.exports.sha1_hash_object(type, contentPtr, content.length, this._shaOutPtr);
 
-    // 2. Build full object (header + content) in WASM memory for deflate
+    // 2. Build full object (header + content) in dynamic region
     const fullLen = header.length + content.length;
     const fullPtr = this.exports.alloc(fullLen);
     if (fullPtr === 0) throw new Error("WASM alloc failed: full object");
     const fullView = new Uint8Array(this.exports.memory.buffer, fullPtr, fullLen);
     fullView.set(header);
-    // Content is already in WASM memory — copy from there (same buffer, no JS roundtrip)
     fullView.set(
       new Uint8Array(this.exports.memory.buffer, contentPtr, content.length),
       header.length
     );
 
-    // 3. Deflate the full object — output stays in WASM memory
+    // 3. Deflate in dynamic region
     const maxBlocks = Math.max(Math.ceil(fullLen / 5000), 1);
     const outCap = fullLen + maxBlocks * 5 + 6 + 64;
     const outPtr = this.exports.alloc(outCap);
@@ -523,9 +543,9 @@ export class WasmEngine {
     const written = this.exports.zlib_deflate(fullPtr, fullLen, outPtr, outCap);
     if (written === 0) throw new Error("Zlib deflate failed");
 
-    // 4. Copy final results out (SHA is 20 bytes, compressed is variable)
+    // 4. SHA from pre-allocated slot (view), compressed from dynamic (copy)
     return {
-      sha1: this.readBytes(shaPtr, 20),
+      sha1: this.viewBytes(this._shaOutPtr, 20),
       compressed: this.readBytes(outPtr, written),
     };
   }
