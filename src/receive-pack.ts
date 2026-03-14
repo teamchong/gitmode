@@ -10,6 +10,7 @@
 
 import type { GitEngine } from "./git-engine";
 import type { Env } from "./env";
+import type { PoolConfig } from "./compute-pool";
 import { decodePktLine, encodePktLine, encodePktLineBytes, FLUSH_PKT } from "./pkt-line";
 import { unpackPackfile, type ObjectCache } from "./packfile-reader";
 import { materializeWorktree } from "./checkout";
@@ -67,7 +68,8 @@ export async function handleReceivePack(
   engine: GitEngine,
   body: Uint8Array,
   env?: Env,
-  repoPath?: string
+  repoPath?: string,
+  poolConfig?: PoolConfig,
 ): Promise<{ response: Response; backgroundWork?: Promise<void> }> {
   // Parse ref update commands and capabilities
   const updates: RefUpdate[] = [];
@@ -183,7 +185,7 @@ export async function handleReceivePack(
       const branch = update.refname.replace(/^refs\/heads\//, "");
       const oldSha = update.oldSha !== ZERO_SHA ? update.oldSha : undefined;
       worktreePromises.push(
-        materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha, objectCache)
+        materializeWorktree(engine, env, repoPath, branch, update.newSha, oldSha, objectCache, poolConfig)
           .catch(err => console.error(`checkout failed for ${branch}: ${err}`))
       );
     }

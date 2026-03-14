@@ -167,7 +167,7 @@ export class RepoStore extends DurableObject<Env> {
         if (body.length > 100 * 1024 * 1024) {
           return new Response("Packfile too large (max 100MB)\n", { status: 413 });
         }
-        const { response, backgroundWork } = await handleReceivePack(engine, body, this.env, repoPath);
+        const { response, backgroundWork } = await handleReceivePack(engine, body, this.env, repoPath, poolConfig);
         if (backgroundWork) {
           this.ctx.waitUntil(backgroundWork);
         }
