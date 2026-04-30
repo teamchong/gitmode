@@ -193,6 +193,44 @@ async function hook(args) {
   process.exit(0);
 }
 
+async function postPromptText(args) {
+  const url = workerUrl(args);
+  const promptId = args["prompt-id"] ?? args.prompt_id;
+  let text = args.text;
+
+  if (!promptId) die("--prompt-id required");
+
+  // Read prompt text from stdin if --text not given.
+  if (text === undefined) {
+    if (process.stdin.isTTY) {
+      die("--text=<string> required, or pipe text on stdin");
+    }
+    let stdin = "";
+    for await (const chunk of process.stdin) stdin += chunk;
+    text = stdin;
+  }
+  if (!text || typeof text !== "string") die("text must be a non-empty string");
+
+  const res = await fetch(`${url}/prompt-text`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt_id: promptId, text }),
+  });
+  process.stdout.write((await res.text()) + "\n");
+  if (!res.ok && res.status !== 200) process.exit(1);
+}
+
+async function getPromptText(args) {
+  const url = workerUrl(args);
+  const promptId = args["prompt-id"] ?? args.prompt_id;
+  if (!promptId) die("--prompt-id required");
+
+  const target = `${url}/prompt-text?prompt_id=${encodeURIComponent(promptId)}`;
+  const res = await fetch(target);
+  process.stdout.write((await res.text()) + "\n");
+  if (!res.ok) process.exit(1);
+}
+
 function die(msg) {
   process.stderr.write(`error: ${msg}\n`);
   process.exit(2);
@@ -202,13 +240,16 @@ function usage() {
   process.stdout.write(`prompt-blame — record and query commit provenance.
 
 usage:
-  prompt-blame post  [--repo=<url>] [--sha=<sha>] [--prompt-id=<id>]
-                     [--model=<m>] [--agent=<a>] [--session-id=<id>]
-                     [--parent-session-id=<id>] [--human-edited=true|false]
-                     [--metadata-json=<json>] [--worker=<url>]
-  prompt-blame get   [--repo=<url>] [--sha=<sha>] [--worker=<url>]
-  prompt-blame hook  [--agent=<a>] [--model=<m>] [--worker=<url>]
-                     # reads Claude Code PostToolUse JSON from stdin
+  prompt-blame post         [--repo=<url>] [--sha=<sha>] [--prompt-id=<id>]
+                            [--model=<m>] [--agent=<a>] [--session-id=<id>]
+                            [--parent-session-id=<id>] [--human-edited=true|false]
+                            [--metadata-json=<json>] [--worker=<url>]
+  prompt-blame get          [--repo=<url>] [--sha=<sha>] [--worker=<url>]
+  prompt-blame hook         [--agent=<a>] [--model=<m>] [--worker=<url>]
+                            # reads Claude Code PostToolUse JSON from stdin
+  prompt-blame post-prompt  --prompt-id=<id> [--text=<string>] [--worker=<url>]
+                            # reads text from stdin if --text omitted
+  prompt-blame get-prompt   --prompt-id=<id> [--worker=<url>]
 
 config:
   --worker=<url>              override Worker URL
@@ -218,6 +259,8 @@ config:
 examples:
   prompt-blame post --agent=claude-code --session-id=abc123
   prompt-blame get --sha=\$(git rev-parse HEAD)
+  echo "design rationale" | prompt-blame post-prompt --prompt-id=design-1
+  prompt-blame get-prompt --prompt-id=design-1
 `);
 }
 
@@ -239,6 +282,12 @@ async function main() {
       break;
     case "hook":
       await hook(args);
+      break;
+    case "post-prompt":
+      await postPromptText(args);
+      break;
+    case "get-prompt":
+      await getPromptText(args);
       break;
     default:
       die(`unknown command: ${cmd}`);

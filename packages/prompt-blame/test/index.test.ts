@@ -29,6 +29,13 @@ CREATE INDEX IF NOT EXISTS idx_commit_metadata_repo_agent
   ON commit_metadata (repo_id, agent) WHERE agent IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_commit_metadata_repo_time
   ON commit_metadata (repo_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS prompt_text (
+  prompt_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 beforeAll(async () => {
@@ -202,5 +209,135 @@ describe("misc", () => {
   it("disallowed method returns 405", async () => {
     const res = await SELF.fetch("https://example.com/metadata", { method: "DELETE" });
     expect(res.status).toBe(405);
+  });
+});
+
+// ============================================================
+// /prompt-text — opt-in prompt content storage
+// ============================================================
+
+async function postPromptText(body: object): Promise<Response> {
+  return SELF.fetch("https://example.com/prompt-text", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function getPromptText(promptId: string): Promise<Response> {
+  return SELF.fetch(
+    `https://example.com/prompt-text?prompt_id=${encodeURIComponent(promptId)}`,
+  );
+}
+
+describe("POST /prompt-text", () => {
+  it("stores text and returns sha-256 hash + size", async () => {
+    const text = "explain how rate limiting works";
+    const res = await postPromptText({ prompt_id: "p1", text });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      ok: boolean;
+      prompt_id: string;
+      text_hash: string;
+      size_bytes: number;
+      dedup: boolean;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.prompt_id).toBe("p1");
+    expect(body.text_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.size_bytes).toBe(text.length);
+    expect(body.dedup).toBe(false);
+  });
+
+  it("is idempotent: same prompt_id with same text returns 200 + dedup=true", async () => {
+    const text = "hello world";
+    const first = await postPromptText({ prompt_id: "p2", text });
+    expect(first.status).toBe(201);
+
+    const second = await postPromptText({ prompt_id: "p2", text });
+    expect(second.status).toBe(200);
+    const body = (await second.json()) as { dedup: boolean };
+    expect(body.dedup).toBe(true);
+  });
+
+  it("rejects same prompt_id with different content (409)", async () => {
+    await postPromptText({ prompt_id: "p3", text: "original" });
+    const res = await postPromptText({ prompt_id: "p3", text: "different" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      error: string;
+      existing_text_hash: string;
+      provided_text_hash: string;
+    };
+    expect(body.error).toContain("already stored");
+    expect(body.existing_text_hash).not.toBe(body.provided_text_hash);
+  });
+
+  it("rejects oversized prompts (>64KB)", async () => {
+    const tooBig = "x".repeat(64 * 1024 + 1);
+    const res = await postPromptText({ prompt_id: "p4", text: tooBig });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("too large");
+  });
+
+  it("rejects empty text", async () => {
+    const res = await postPromptText({ prompt_id: "p5", text: "" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects missing prompt_id", async () => {
+    const res = await postPromptText({ text: "x" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects oversized prompt_id (>256 chars)", async () => {
+    const res = await postPromptText({ prompt_id: "x".repeat(257), text: "x" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects non-string text", async () => {
+    const res = await postPromptText({ prompt_id: "p6", text: 12345 });
+    expect(res.status).toBe(400);
+  });
+
+  it("preserves multibyte content (size_bytes is byte count, not char count)", async () => {
+    // Greek alpha: 1 char, 2 bytes in UTF-8
+    const text = "alpha-α-beta";
+    const res = await postPromptText({ prompt_id: "p7", text });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { size_bytes: number };
+    // "alpha-" (6) + α (2 bytes) + "-beta" (5) = 13 bytes
+    expect(body.size_bytes).toBe(13);
+  });
+});
+
+describe("GET /prompt-text", () => {
+  it("returns the stored text after POST", async () => {
+    const text = "design rationale: keep prompt-text opt-in";
+    const promptId = "get-roundtrip-1";
+    await postPromptText({ prompt_id: promptId, text });
+
+    const res = await getPromptText(promptId);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      prompt_id: string;
+      text: string;
+      text_hash: string;
+      size_bytes: number;
+    };
+    expect(body.prompt_id).toBe(promptId);
+    expect(body.text).toBe(text);
+    expect(body.size_bytes).toBe(text.length);
+  });
+
+  it("returns 404 for unknown prompt_id", async () => {
+    const res = await getPromptText("does-not-exist");
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects missing prompt_id query param", async () => {
+    const res = await SELF.fetch("https://example.com/prompt-text");
+    expect(res.status).toBe(400);
   });
 });

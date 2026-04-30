@@ -17,8 +17,10 @@ For every commit produced by an AI agent, capture:
 Then expose:
 
 - `POST /metadata` — capture metadata for a `(repo, commit_sha)`
-- `GET /metadata/:repo/:sha` — return what was captured for one commit
-- `GET /blame/:repo/:sha?path=foo.ts` — *(future)* per-line provenance, joining git blame with metadata
+- `GET /metadata?repo=&sha=` — return what was captured for one commit
+- `POST /prompt-text` — opt-in storage of prompt content; returns sha-256 hash + size
+- `GET /prompt-text?prompt_id=` — return stored prompt text
+- *(future)* `GET /blame/:repo/:sha?path=foo.ts` — per-line provenance, joining git blame with metadata
 
 ## Design decisions
 
@@ -47,7 +49,7 @@ For Phase 2 we store **per-commit** metadata only. Per-line provenance arrives i
 - Customer-identifiable data
 - Confidential design discussions
 
-Default is `prompt_id` only (a hash or UUID). When the user opts in, prompt text goes to **R2 keyed by prompt_id hash**, not D1 — D1 isn't sized for blob storage.
+Default is `prompt_id` only (a hash or UUID). The opt-in path is `POST /prompt-text` which stores the text in D1 (capped at 64KB; bigger prompts would go to R2 — deferred). Idempotent: writing the same `prompt_id` with the same text is a no-op; with different text, returns 409 (treats `prompt_id` as content-addressed).
 
 ### Repo identifier shape
 
@@ -136,11 +138,28 @@ The CLI auto-detects `repo_id` from `git config --get remote.origin.url` (with n
 ### Direct HTTP
 
 ```bash
+# Commit metadata
 curl -X POST http://localhost:8787/metadata \
   -H "content-type: application/json" \
   -d '{"repo_id":"https://github.com/user/repo.git","commit_sha":"<40-hex>","agent":"claude-code"}'
 
 curl "http://localhost:8787/metadata?repo=https%3A%2F%2Fgithub.com%2Fuser%2Frepo.git&sha=<40-hex>"
+
+# Opt-in prompt text storage
+curl -X POST http://localhost:8787/prompt-text \
+  -H "content-type: application/json" \
+  -d '{"prompt_id":"design-1","text":"explain the rate-limiting strategy"}'
+
+curl "http://localhost:8787/prompt-text?prompt_id=design-1"
+```
+
+The same operations are available via the CLI:
+
+```bash
+echo "explain the rate-limiting strategy" | \
+  node bin/prompt-blame.mjs post-prompt --prompt-id=design-1
+
+node bin/prompt-blame.mjs get-prompt --prompt-id=design-1
 ```
 
 ## Examples

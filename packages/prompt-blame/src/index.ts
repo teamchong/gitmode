@@ -160,6 +160,131 @@ interface CommitMetadataRow {
   created_at: number;
 }
 
+// ============================================================
+// /prompt-text — opt-in storage for prompt content
+// ============================================================
+// Privacy-aware design: prompt_text is never stored automatically. Callers
+// explicitly opt in by hitting POST /prompt-text. The schema reserves a
+// separate table so that commits' metadata rows in the read-heavy
+// commit_metadata table aren't bloated with conditionally-present blobs.
+//
+// Idempotency: writing the same prompt_id with the same text is a no-op.
+// Writing the same prompt_id with DIFFERENT text returns 409 — prompt_id
+// is treated as content-addressed by the caller (typically a content hash).
+
+const MAX_PROMPT_BYTES = 64 * 1024; // 64KB cap; bigger prompts go to R2 (deferred)
+const MIN_PROMPT_ID_LEN = 1;
+const MAX_PROMPT_ID_LEN = 256;
+
+interface PromptTextRow {
+  prompt_id: string;
+  text: string;
+  text_hash: string;
+  size_bytes: number;
+  created_at: number;
+}
+
+async function sha256Hex(s: string): Promise<string> {
+  const bytes = new TextEncoder().encode(s);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const arr = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < arr.length; i++) {
+    out += arr[i]!.toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+async function handlePostPromptText(req: Request, env: Env): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return badRequest("invalid JSON body");
+  }
+  if (!raw || typeof raw !== "object") return badRequest("body must be a JSON object");
+  const b = raw as Record<string, unknown>;
+
+  if (typeof b.prompt_id !== "string") return badRequest("prompt_id must be a string");
+  if (b.prompt_id.length < MIN_PROMPT_ID_LEN || b.prompt_id.length > MAX_PROMPT_ID_LEN) {
+    return badRequest(`prompt_id length must be ${MIN_PROMPT_ID_LEN}..${MAX_PROMPT_ID_LEN}`);
+  }
+  if (typeof b.text !== "string") return badRequest("text must be a string");
+
+  const sizeBytes = new TextEncoder().encode(b.text).length;
+  if (sizeBytes === 0) return badRequest("text must be non-empty");
+  if (sizeBytes > MAX_PROMPT_BYTES) {
+    return badRequest(`text too large (${sizeBytes} > ${MAX_PROMPT_BYTES} bytes)`);
+  }
+
+  const promptId = b.prompt_id;
+  const text = b.text;
+  const textHash = await sha256Hex(text);
+  const now = Date.now();
+
+  // Idempotent insert: same prompt_id + same hash = ok; different hash = 409
+  const existing = await env.PROMPT_BLAME_DB.prepare(
+    `SELECT text_hash FROM prompt_text WHERE prompt_id = ?`,
+  )
+    .bind(promptId)
+    .first<{ text_hash: string }>();
+
+  if (existing) {
+    if (existing.text_hash === textHash) {
+      return jsonResponse(
+        { ok: true, prompt_id: promptId, text_hash: textHash, size_bytes: sizeBytes, dedup: true },
+        200,
+      );
+    }
+    return jsonResponse(
+      {
+        error:
+          "prompt_id already stored with different content; prompt_id should be content-addressed (e.g. sha-256 of text)",
+        existing_text_hash: existing.text_hash,
+        provided_text_hash: textHash,
+      },
+      409,
+    );
+  }
+
+  await env.PROMPT_BLAME_DB.prepare(
+    `INSERT INTO prompt_text (prompt_id, text, text_hash, size_bytes, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  )
+    .bind(promptId, text, textHash, sizeBytes, now)
+    .run();
+
+  return jsonResponse(
+    { ok: true, prompt_id: promptId, text_hash: textHash, size_bytes: sizeBytes, dedup: false },
+    201,
+  );
+}
+
+async function handleGetPromptText(url: URL, env: Env): Promise<Response> {
+  const promptId = url.searchParams.get("prompt_id");
+  if (!promptId) return badRequest("prompt_id query param required");
+  if (promptId.length < MIN_PROMPT_ID_LEN || promptId.length > MAX_PROMPT_ID_LEN) {
+    return badRequest(`prompt_id length must be ${MIN_PROMPT_ID_LEN}..${MAX_PROMPT_ID_LEN}`);
+  }
+
+  const row = await env.PROMPT_BLAME_DB.prepare(
+    `SELECT prompt_id, text, text_hash, size_bytes, created_at
+     FROM prompt_text WHERE prompt_id = ?`,
+  )
+    .bind(promptId)
+    .first<PromptTextRow>();
+
+  if (!row) return notFound();
+
+  return jsonResponse({
+    prompt_id: row.prompt_id,
+    text: row.text,
+    text_hash: row.text_hash,
+    size_bytes: row.size_bytes,
+    created_at: row.created_at,
+  });
+}
+
 async function handleGet(url: URL, env: Env): Promise<Response> {
   const repo = url.searchParams.get("repo");
   const sha = url.searchParams.get("sha");
@@ -202,6 +327,12 @@ export default {
     if (url.pathname === "/metadata") {
       if (req.method === "POST") return handlePost(req, env);
       if (req.method === "GET") return handleGet(url, env);
+      return new Response("method not allowed", { status: 405 });
+    }
+
+    if (url.pathname === "/prompt-text") {
+      if (req.method === "POST") return handlePostPromptText(req, env);
+      if (req.method === "GET") return handleGetPromptText(url, env);
       return new Response("method not allowed", { status: 405 });
     }
 
