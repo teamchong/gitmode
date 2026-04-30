@@ -13,7 +13,7 @@ The repository previously hosted a self-hosted Git server. After Cloudflare laun
 | Package | What it does |
 |---|---|
 | [`@gitmode/prompt-blame`](./packages/prompt-blame) | Worker + D1 schema + CLI for capturing prompt/session/model/agent metadata per commit and querying it back. |
-| [`@gitmode/edge-compute-pool`](./packages/edge-compute-pool) | Fan-out compute for git operations on Cloudflare. `PackWorkerDO` slots execute six actions: `build-segment`, `write-worktree`, `diff-blobs`, `grep-blobs`, `walk-trees`, `parse-commits`. |
+| [`@gitmode/edge-compute-pool`](./packages/edge-compute-pool) | Fan-out compute for git operations on Cloudflare. `PackWorkerDO` slots execute seven actions: `build-segment`, `write-worktree`, `diff-blobs`, `grep-blobs`, `walk-trees`, `parse-commits`, `read-blobs`. Three coordinators (`mergeBase`, `logWalk`, `blameWalk`) demonstrate composition. End-to-end Artifacts integration via `fetchArtifactsCommit` (Git smart HTTP + packfile unpack). |
 | [`@gitmode/wasm-git`](./packages/wasm-git) | Zig+WASM engine for git primitives (SHA-1 SIMD128, libdeflate, delta, packfile). |
 
 ## R&D bets
@@ -53,6 +53,53 @@ node bin/prompt-blame.mjs post --agent=claude-code --session-id=demo
 
 # Query it back
 node bin/prompt-blame.mjs get
+```
+
+### Full toolkit composing against an Artifacts repo
+
+```ts
+import { WasmEngine } from "@gitmode/wasm-git";
+import {
+  fetchArtifactsCommit,
+  discoverArtifactsRefs,
+  blameWalk,
+} from "@gitmode/edge-compute-pool";
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const wasm = await WasmEngine.create();
+    const url = "https://x.artifacts.cloudflare.net/git/repo-1.git";
+
+    // 1. Resolve a branch to its tip
+    const adv = await discoverArtifactsRefs({ artifactsUrl: url, token: env.ARTIFACTS_TOKEN });
+    const headSha = adv.refs.get("refs/heads/main")!;
+
+    // 2. Stage that commit's transitive closure in R2
+    await fetchArtifactsCommit({
+      artifactsUrl: url,
+      token: env.ARTIFACTS_TOKEN,
+      commitSha: headSha,
+      repoPath: "repo-1",
+      bucket: env.OBJECTS,
+      wasm,
+    });
+
+    // 3. Blame a file using the staged objects
+    const lookup = (sha: string) => ({ looseKey: `repo-1/loose/${sha}` });
+    const blame = await blameWalk({
+      startSha: headSha,
+      filePath: "src/index.ts",
+      repoPath: "repo-1",
+      lookup,
+      pool: env.PACK_WORKER,
+    });
+
+    // 4. (optionally) enrich each line's commit with prompt-blame provenance
+    //    by querying the @gitmode/prompt-blame Worker for { prompt_id, agent, session }.
+
+    return Response.json({ blame });
+  },
+};
 ```
 
 ### Building WASM from source
