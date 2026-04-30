@@ -4,6 +4,35 @@
 
 > **Status: POC for learning.** This is a proof-of-concept and a learning vehicle, not a product. There is no launch, no roadmap commitment, and no expectation of users adopting it. The "wins" below mean *what was learned*, not *what shipped to whom*.
 
+## Key learnings (the POC deliverable)
+
+Captured in flight. These are the takeaways that justify the time spent.
+
+### Architecture
+
+- **Same problem → same architecture.** Independently arriving at Worker + DO + R2 + Zig WASM (and then watching Cloudflare ship Artifacts with that exact stack) is strong evidence the design space has a clear local optimum. Validates the choice but also explains why parallel solo OSS doesn't make sense.
+- **Closed product + open primitives.** Cloudflare's strategy with Artifacts is closed server, OSS client (ArtifactFS). That dictates how an outsider can contribute: build *adjacent* OSS that consumes the public API, not parallel implementations. The toolkit pivot followed naturally from understanding this.
+- **Move compute to the data.** PackWorkerDO slots reading directly from R2 and processing locally, returning only results, keeps the coordinator memory flat regardless of repo size. The ~128MB DO memory ceiling becomes the *unit of compute*, not a constraint.
+
+### Concrete technical wins
+
+- **Pre-allocated scratch ABI** (Zig+WASM): allocate the I/O buffer once at WASM init, reuse for every call, no `alloc()` per-operation. `_resetDynamic()` rolls back only dynamic allocations between calls. The `engine.test.ts` heap-stability test proves this works — 50 iterations of `sha1Hex` keep heap growth under 1MB total.
+- **Zero-copy WASM views.** `viewBytes(ptr, len)` returns a `Uint8Array` directly into linear memory; consumers either use it immediately (then trigger another op) or copy. Saves the per-call clone of the read buffer.
+- **`parse-commits` as a primitive** beats shipping separate `merge-base` / `log-walk` / `blame-walk` actions. Coordinator-side BFS over a single read primitive is cleaner: smaller slot interface, frontier-width fan-out, callers compose any history walk. Both `mergeBase` and `logWalk` shipped as ~120-line files on top.
+
+### Cloudflare Workers surprises
+
+- **`vitest-pool-workers` cross-package .wasm fails by default** when an import chain crosses pnpm-symlinked workspace boundaries. Fix: `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]`. Spent significant time discovering this; documenting it here so future-me doesn't.
+- **D1 isolates per-test** by default in `vitest-pool-workers`. Tests that POST then GET in separate `it()` blocks fail unexpectedly. Either disable isolation (`isolatedStorage: false`) or make each test self-contained.
+- **`r2.put` returns `Promise<R2Object | null>`**, not `Promise<void>`. Storing a list of fire-and-forget puts means `Promise<unknown>[]`.
+- **Loose objects vs chunk index** is a major design decision. Chunked R2 objects (~2MB) cut R2 op count 200×; loose objects make test setup easier. The `parse-commits` action supports both via the `looseKey` and `chunkKey + offset + length` discriminator on `ObjectDescriptor`.
+
+### Strategic learnings
+
+- **Hashimoto's "biggest opening since Git"** (the prompt-blame insight) is a real opening. Git tracks who and when; agents need *which prompt*. No incumbent has shipped this. The bet is small enough to prototype solo (one D1 table, one Worker, one CLI) and pairs naturally with local-side capture (`../timeline`).
+- **Conflict of interest is a real planning input** for OSS work as a CF employee. Building parallel Git servers would have been awkward; building adjacent toolkit is fine. The pivot was driven as much by COI considerations as by technical comparison.
+- **Reframing "win conditions" as "learning targets"** matters. The first draft of this doc had product-shipping language baked in. POC framing wasn't internalized until the user explicitly named it. Future projects: name "POC vs product" in the very first sentence.
+
 ## TL;DR
 
 gitmode started as a Git server that runs entirely on Cloudflare Workers (Worker + Durable Objects + R2 + Zig WASM).
