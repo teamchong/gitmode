@@ -49,6 +49,34 @@ export {
   type BlameWalkOptions,
   type BlameLine,
 } from "./coordinators/blame-walk";
+export {
+  fetchArtifactsCommit,
+  discoverArtifactsRefs,
+  type FetchArtifactsCommitOptions,
+  type FetchArtifactsCommitResult,
+} from "./coordinators/artifacts-fetch";
+// Protocol primitives — exported for callers that want to compose their own
+// fetch flows or inspect packfile contents directly.
+export {
+  unpackPackfile,
+  type UnpackedObject,
+  type UnpackOptions,
+  type UnpackResult,
+} from "./protocol/packfile-reader";
+export {
+  discoverRefs,
+  fetchPack,
+  type SmartHttpOptions,
+  type RefAdvertisement,
+  type FetchPackOptions,
+  type FetchPackResult,
+} from "./protocol/smart-http";
+export {
+  encodePktLine,
+  encodePktLineBytes,
+  decodePktLine,
+  parsePktLines,
+} from "./protocol/pkt-line";
 
 // Required by vitest-pool-workers / wrangler entry resolution.
 // This package is consumed as a library; the fetch handler returns 404 because

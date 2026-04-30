@@ -119,11 +119,51 @@ Tune via env var or `PoolConfig.maxSlots`. The cap exists because each slot is a
 
 Below the threshold (200 objects for packfile, 10 for diff, 50 for grep) the local path is faster — you skip the RPC overhead.
 
+## Artifacts integration
+
+Beyond the slot/coordinator surface, this package ships an end-to-end fetch path for [Cloudflare Artifacts](https://blog.cloudflare.com/artifacts-git-for-agents-beta/) (or any Git smart-HTTP v1 server):
+
+```ts
+import { fetchArtifactsCommit, discoverArtifactsRefs } from "@gitmode/edge-compute-pool";
+import { WasmEngine } from "@gitmode/wasm-git";
+
+const wasm = await WasmEngine.create();
+
+// Resolve a branch to its tip SHA
+const adv = await discoverArtifactsRefs({
+  artifactsUrl: "https://x.artifacts.cloudflare.net/git/repo-1.git",
+  token: env.ARTIFACTS_TOKEN,
+});
+const headSha = adv.refs.get("refs/heads/main")!;
+
+// Fetch the commit + transitive closure into R2 in the layout the pool actions expect
+await fetchArtifactsCommit({
+  artifactsUrl: "https://x.artifacts.cloudflare.net/git/repo-1.git",
+  token: env.ARTIFACTS_TOKEN,
+  commitSha: headSha,
+  repoPath: "my-repo",
+  bucket: env.OBJECTS,
+  wasm,
+});
+
+// Now the pool actions work — same as if you'd pushed objects yourself
+await blameWalk({ startSha: headSha, filePath: "src/foo.ts", repoPath: "my-repo", lookup, pool: env.PACK_WORKER });
+```
+
+Implementation pieces (all in `src/protocol/`):
+
+- **`pkt-line.ts`** — Git's framing protocol: 4-hex-digit length prefix, flush/delim markers, sideband channel demultiplexing.
+- **`smart-http.ts`** — `discoverRefs` (GET info/refs) and `fetchPack` (POST git-upload-pack with want/done request body, sideband-64k response demux).
+- **`packfile-reader.ts`** — Pack v2 parser: SHA-1 trailer verification, type+size header decode, zlib inflate via WasmEngine, ref-delta and ofs-delta resolution.
+
+The integration test (`test/artifacts-fetch.integration.test.ts`) stands up an in-memory Artifacts-shaped server, fetches a commit closure end-to-end, and verifies the staged objects are readable by `parse-commits` and `read-blobs`. No real Artifacts access required.
+
 ## Limitations
 
 - Unpack is **not** fan-out-able — delta chains require ordering within a packfile.
 - One coordinator can saturate ~20 slots; beyond that you're better off sharding work across multiple coordinators.
 - The package depends on `@gitmode/wasm-git` for SHA-1, zlib, delta, packfile primitives. Cross-package WASM imports under `vitest-pool-workers` require `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]` in the consumer's `vitest.config.ts` (already wired up in this package's own tests).
+- Smart-HTTP client targets Git protocol v1 (which Artifacts also supports). Protocol v2 (`Git-Protocol: version=2`) would need a separate ls-refs / fetch command implementation and is not shipped.
 
 ## Status / extraction
 
