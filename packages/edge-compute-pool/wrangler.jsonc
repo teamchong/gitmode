@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "edge-compute-pool",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": false
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PACK_WORKER", "class_name": "PackWorkerDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_classes": ["PackWorkerDO"] }],
+  "r2_buckets": [{ "binding": "OBJECTS", "bucket_name": "edge-compute-pool-objects" }]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@gitmode/prompt-blame",
+  "version": "0.0.1",
+  "description": "Prompt-blame Worker: capture and query prompt provenance for git commits",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "prompt-blame": "./bin/prompt-blame.mjs"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply prompt_blame_db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply prompt_blame_db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.20",
+    "@cloudflare/workers-types": "^4.20250301.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.71.0"
+  }
+}

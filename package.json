@@ -1,93 +1,29 @@
 {
   "name": "gitmode",
   "version": "0.1.0",
-  "description": "Git server on Cloudflare Workers — Zig WASM engine with SIMD",
+  "description": "OSS toolkit for extending Cloudflare Artifacts: prompt-blame, edge compute pool, WASM git primitives",
   "type": "module",
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
-    },
-    "./server": {
-      "types": "./src/server.ts",
-      "default": "./src/server.ts"
-    },
-    "./client": {
-      "types": "./src/client.ts",
-      "default": "./src/client.ts"
-    }
-  },
-  "bin": {
-    "gitmode": "./bin/gitmode.mjs"
-  },
-  "files": [
-    "src/**/*.ts",
-    "!src/worker.ts",
-    "src/wasm/*.wasm",
-    "bin/gitmode.mjs",
-    "bin/template/"
-  ],
-  "keywords": [
-    "git",
-    "cloudflare",
-    "workers",
-    "durable-objects",
-    "r2",
-    "wasm",
-    "zig"
-  ],
+  "private": true,
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/teamchong/gitmode.git"
   },
-  "license": "MIT",
   "packageManager": "pnpm@10.21.0",
   "scripts": {
-    "build:wasm": "cd wasm && zig build wasm -Doptimize=ReleaseSmall && mkdir -p ../src/wasm && wasm-metadce --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --graph-file exports.json zig-out/bin/gitmode.wasm -o ../src/wasm/gitmode.dce.wasm && wasm-opt -Oz --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int ../src/wasm/gitmode.dce.wasm -o ../src/wasm/gitmode.wasm && rm ../src/wasm/gitmode.dce.wasm",
-    "build:wasm-core": "cd wasm && zig build core -Doptimize=ReleaseSmall && mkdir -p ../src/wasm && wasm-metadce --enable-simd --enable-bulk-memory --graph-file exports-core.json zig-out/bin/gitmode-core.wasm -o ../src/wasm/gitmode-core.dce.wasm && wasm-opt -Oz --enable-simd --enable-bulk-memory ../src/wasm/gitmode-core.dce.wasm -o ../src/wasm/gitmode-core.wasm && rm ../src/wasm/gitmode-core.dce.wasm",
+    "build:wasm": "cd wasm && zig build wasm -Doptimize=ReleaseSmall && mkdir -p ../packages/wasm-git/src/wasm && wasm-metadce --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --graph-file exports.json zig-out/bin/gitmode.wasm -o ../packages/wasm-git/src/wasm/gitmode.dce.wasm && wasm-opt -Oz --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int ../packages/wasm-git/src/wasm/gitmode.dce.wasm -o ../packages/wasm-git/src/wasm/gitmode.wasm && rm ../packages/wasm-git/src/wasm/gitmode.dce.wasm",
+    "build:wasm-core": "cd wasm && zig build core -Doptimize=ReleaseSmall && mkdir -p ../packages/wasm-git/src/wasm && wasm-metadce --enable-simd --enable-bulk-memory --graph-file exports-core.json zig-out/bin/gitmode-core.wasm -o ../packages/wasm-git/src/wasm/gitmode-core.dce.wasm && wasm-opt -Oz --enable-simd --enable-bulk-memory ../packages/wasm-git/src/wasm/gitmode-core.dce.wasm -o ../packages/wasm-git/src/wasm/gitmode-core.wasm && rm ../packages/wasm-git/src/wasm/gitmode-core.dce.wasm",
     "build:wasm-all": "pnpm run build:wasm && pnpm run build:wasm-core",
-    "build": "vite build",
-    "dev": "vite dev",
-    "preview": "vite preview",
-    "deploy": "pnpm run build && wrangler deploy",
     "test:zig": "cd wasm && zig build test",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:conformance": "bash test/conformance.sh",
-    "test:ssh": "bash test/ssh-conformance.sh",
-    "ssh:proxy": "npx tsx ssh/proxy.ts"
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.20",
-    "@cloudflare/workers-types": "^4.20250301.0",
-    "@types/ssh2": "^1.15.5",
-    "@vitest/runner": "~3.2.4",
-    "@vitest/snapshot": "~3.2.4",
-    "ssh2": "^1.17.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.2.4",
-    "wrangler": "^4.71.0"
-  },
-  "peerDependencies": {
-    "wrangler": ">=3.0.0"
-  },
-  "peerDependenciesMeta": {
-    "wrangler": {
-      "optional": true
-    }
+    "typescript": "^5.7.0"
   },
   "pnpm": {
     "overrides": {
       "rollup": ">=4.58.0"
     }
-  },
-  "dependencies": {
-    "@cloudflare/vite-plugin": "^1.26.1",
-    "@vitejs/plugin-rsc": "^0.5.21",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "react-server-dom-webpack": "^19.2.4",
-    "vinext": "^0.0.21",
-    "vite": "^7.3.1"
   }
 }

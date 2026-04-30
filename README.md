@@ -1,248 +1,87 @@
 # gitmode
 
-> **Warning: Experimental** — This project is a proof-of-concept and under active development. APIs, storage layout, and functionality may change without notice. Not recommended for production use.
+> **Disclaimer.** Personal open-source project. Not affiliated with, endorsed by, or representative of Cloudflare. Opinions and design decisions are the author's own. See [DISCLAIMER.md](./DISCLAIMER.md) for the full statement.
 
-Git server running entirely on Cloudflare Workers. No VMs, no servers — just Workers + R2 + Durable Objects.
+> **Status: POC for learning.** Proof-of-concept and learning vehicle. Not a product. Packages are not published to npm; there is no launch or roadmap commitment.
 
-The git protocol engine is written in Zig, compiled to WASM with SIMD128 acceleration for SHA-1 hashing, zlib (via libdeflate), delta compression, and packfile operations. libgit2 is statically linked for advanced operations (diff, blame, revwalk).
+POC toolkit exploring how to extend [Cloudflare Artifacts](https://blog.cloudflare.com/artifacts-git-for-agents-beta/) (or any Git remote) with agent-aware capabilities Artifacts itself does not ship: prompt provenance, edge-compute fan-out for diff/grep/walk, and the WASM git primitives that make those fast.
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/teamchong/gitmode)
+The repository previously hosted a self-hosted Git server. After Cloudflare launched Artifacts in April 2026 with the same architecture, the project pivoted to a toolkit *on top of* Artifacts. See [DESIGN-NOTES.md](./DESIGN-NOTES.md) for the full pivot rationale.
 
-## Deploy your own
+## Packages
 
-### One-click deploy
+| Package | What it does |
+|---|---|
+| [`@gitmode/prompt-blame`](./packages/prompt-blame) | Worker + D1 schema + CLI for capturing prompt/session/model/agent metadata per commit and querying it back. |
+| [`@gitmode/edge-compute-pool`](./packages/edge-compute-pool) | Fan-out compute for git operations on Cloudflare. `PackWorkerDO` slots execute six actions: `build-segment`, `write-worktree`, `diff-blobs`, `grep-blobs`, `walk-trees`, `parse-commits`. |
+| [`@gitmode/wasm-git`](./packages/wasm-git) | Zig+WASM engine for git primitives (SHA-1 SIMD128, libdeflate, delta, packfile). |
 
-Click the button above to:
-1. Fork this repo to your GitHub
-2. Connect your Cloudflare account
-3. Auto-provision R2 bucket and Durable Objects
-4. Deploy the Worker
+## R&D bets
 
-### Manual deploy
+Two open lines, both targeting gaps in the agent-native git story:
 
-```bash
-git clone https://github.com/teamchong/gitmode.git
-cd gitmode
-./scripts/setup.sh
-```
+1. **Prompt-blame primitives.** As more code is AI-generated, `git blame` answers "who" but not "which prompt." `@gitmode/prompt-blame` provides the sidecar so any client (Claude Code, Cursor, Copilot, etc.) can record provenance at commit time and any reviewer can query it back. Composes with [timeline](https://github.com/teamchong/timeline) (local snapshot capture).
+2. **Edge compute pool.** Artifacts ships repo storage but not compute primitives. `git log -S "TODO"` over a million commits is slow because it's serial. The pool fans BFS history walks across Durable Object slots — each slot is a ~128MB compute unit reading from R2 directly.
 
-Requires: [Zig 0.15.2+](https://ziglang.org), [pnpm](https://pnpm.io), [wrangler](https://developers.cloudflare.com/workers/wrangler/)
-
-## Usage
-
-Once deployed, use standard git commands:
+## Quick start
 
 ```bash
-# Clone a repo
-git clone https://gitmode.your-subdomain.workers.dev/alice/myproject.git
+pnpm install
 
-# Push to a new repo
-mkdir myproject && cd myproject
-git init && git add . && git commit -m "init"
-git remote add origin https://gitmode.your-subdomain.workers.dev/alice/myproject.git
-git push -u origin main
+# Run all package tests
+pnpm test
+
+# Typecheck everything
+pnpm typecheck
 ```
 
-## Architecture
+Each package ships its own `wrangler.jsonc`, `vitest.config.ts`, and migrations. See the package READMEs for usage.
 
-![Architecture](docs/public/img/architecture.svg)
-
-### Storage
-
-| Data | Storage | Why |
-|------|---------|-----|
-| Git objects (blobs, trees, commits) | R2 | Bundled into ~2MB chunks, indexed via SQLite for O(1) lookups |
-| Object chunk index | DO SQLite | Maps SHA → chunk key + byte offset for range reads |
-| Worktree files (materialized on push) | R2 | Direct file access for UI, edge-cached |
-| Refs (branches, tags, HEAD) | DO SQLite | Strongly consistent, co-located with ref update logic |
-| Metadata (repos, commits, permissions) | DO SQLite | SQL queries, no cross-service latency |
-| File size cache | DO SQLite | Avoids R2 reads for stats endpoint |
-| Push coordination | Durable Objects | Single-threaded per repo — atomic ref updates without locks |
-
-### Why Durable Objects with SQLite (not KV + D1)
-
-Previous versions used KV for refs and D1 for metadata. This had problems:
-
-- **KV eventual consistency**: After a push, `git ls-remote` could return stale refs for up to 60 seconds.
-- **Cross-service latency**: Every git operation required multiple round-trips between Worker, KV, D1, and a separate DO for locking.
-- **4 services to manage**: R2 + KV + D1 + DO made deployment and debugging complex.
-
-The current architecture uses just **2 services** (R2 + DO). Each repo gets its own Durable Object with embedded SQLite. Refs, metadata, and coordination all happen in a single strongly-consistent context with zero cross-service latency.
-
-### Why Zig WASM
-
-Git's hot paths are CPU-bound binary operations — SHA-1 hashing, zlib decompression, delta patching, packfile assembly. Zig compiled to WASM with SIMD128 handles these 10-50x faster than JavaScript:
-
-- **SHA-1**: Every object read/write hashes. SIMD-accelerated rounds.
-- **Delta compression**: SIMD memcmp for finding copy regions in base objects.
-- **Packfile parsing**: Binary protocol with varint encoding — Zig's type system maps 1:1.
-- **Zlib**: Vendored libdeflate 1.25 — faster than Zig's std.compress.flate.
-- **Memory**: Fixed 64MB arena allocator. No GC pauses during large pushes.
-
-## Performance
-
-Benchmarked on localhost dev server (wrangler dev) with R2 chunk storage, batch reads, streaming clone, and async worktree materialization:
-
-| Metric | 100 files (796K) | 1K files (7.8MB) | 5K files (39MB) |
-|---|---|---|---|
-| **Push** | 182ms | 585ms | 3.4s |
-| **Clone** | 107ms | 686ms | 3.1s |
-| **Incremental push** | 130ms | 372ms | 867ms |
-| **Stats API** | 67ms | 186ms | 447ms |
-| **Files API** | 65ms | 190ms | 435ms |
-
-Key optimizations:
-- **R2 chunk storage**: Objects bundled into ~2MB R2 values with SQLite index — reduces 10K individual R2 ops to ~50 chunk reads
-- **Batch readObjects**: Groups SHAs by chunk key, fetches each chunk once, extracts all objects
-- **Fan-out packfile assembly**: Large clones (>200 objects) distribute work to a pool of PackWorkerDO instances for parallel R2 reads + compression, overcoming the single-DO 128MB memory limit
-- **Streaming clone**: ReadableStream for sideband-wrapped packfile — 1x memory vs 3x buffered
-- **Async worktree**: Large pushes (>500 objects) defer worktree materialization via `ctx.waitUntil()`, yielding between batches
-- **SQLite-first lookups**: `hasObject()` checks chunk index before R2 HEAD — no round trip
-- **Incremental worktree**: Diffs old tree vs new tree, only writes changed/added files
-- **Optimistic object cache**: Worktree uses in-memory objects from packfile unpack, zero R2 re-reads
-
-## Git features
-
-| Feature | Status |
-|---------|--------|
-| `git clone` (HTTPS) | Supported |
-| `git push` | Supported |
-| `git fetch` / `git pull` | Supported |
-| Branches and tags | Supported |
-| Delta compression (ofs-delta, ref-delta) | Supported |
-| Packfile v2 | Supported |
-| Diff | Supported |
-| Blame (via libgit2) | Supported |
-| Commit history / log | Supported |
-| REST API (29 endpoints) | Supported |
-| SSH transport | Supported |
-| Server-side merge (ff + 3-way) | Supported |
-| Cherry-pick / revert / reset | Supported |
-| Shallow clone (`--depth`) | Planned |
-| Git LFS | Planned (R2 backend) |
-| Protocol v2 | Planned |
-
-## Development
+### prompt-blame end-to-end
 
 ```bash
-# Build WASM
-pnpm run build:wasm
+cd packages/prompt-blame
 
-# Run Zig tests
-pnpm run test:zig
+# Apply local D1 migrations
+pnpm db:migrate:local
 
-# Run integration tests
-pnpm run test
+# Start the Worker on localhost:8787
+pnpm dev
 
-# Run performance benchmarks
-./test/bench.sh
+# In another shell — record metadata for the latest commit
+node bin/prompt-blame.mjs post --agent=claude-code --session-id=demo
 
-# Local dev server
-pnpm run dev
-
-# Deploy
-pnpm run deploy
+# Query it back
+node bin/prompt-blame.mjs get
 ```
 
-## npm package
+### Building WASM from source
 
-Install gitmode as an npm package to run your own git server on Cloudflare Workers:
+The `.wasm` binaries are committed at `packages/wasm-git/src/wasm/`. Rebuild from the Zig sources at `wasm/`:
 
 ```bash
-npx gitmode init     # Scaffold worker + wrangler config
-npx gitmode deploy   # Deploy to Cloudflare Workers
+pnpm run build:wasm        # gitmode.wasm (full + libgit2)
+pnpm run build:wasm-core   # gitmode-core.wasm (lightweight)
 ```
 
-Or import directly into your Worker:
-
-```ts
-import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
-export { RepoStore, PackWorkerDO };
-export default { fetch: createHandler() };
-```
-
-With custom auth:
-
-```ts
-import { RepoStore, PackWorkerDO, createHandler } from "gitmode";
-export { RepoStore, PackWorkerDO };
-const gitmode = createHandler();
-export default {
-  fetch(req, env) {
-    if (!authorize(req)) return new Response("Unauthorized", { status: 401 });
-    return gitmode(req, env);
-  }
-};
-```
-
-### Entry points
-
-Three tree-shakeable entry points:
-
-```ts
-import { createHandler, RepoStore } from "gitmode";            // Server handler + DO class
-import { WasmEngine } from "gitmode/server";   // Full engine (865KB WASM) — server-side git ops
-import { WasmEngineCore } from "gitmode/client";  // Core engine (83KB WASM) — SHA-1, zlib, delta only
-```
+Requires Zig 0.15.2, `wasm-metadce`, `wasm-opt`. See the [package README](./packages/wasm-git#building-wasm-from-source) for known build-environment caveats.
 
 ## Project structure
 
 ```
 gitmode/
-├── wasm/                    Zig WASM engine
-│   ├── build.zig            wasm32-wasi + SIMD128
-│   └── src/
-│       ├── main.zig         Server WASM exports (865KB)
-│       ├── main_core.zig    Client WASM exports (83KB)
-│       ├── sha1.zig         SHA-1 (SIMD-accelerated)
-│       ├── object.zig       Git object format
-│       ├── pack.zig         Packfile v2
-│       ├── delta.zig        Delta compression
-│       ├── zlib.zig         Inflate/deflate via libdeflate
-│       ├── protocol.zig     pkt-line framing
-│       ├── simd.zig         SIMD128 memory ops
-│       ├── libgit2.zig      libgit2 bindings (diff, blame, revwalk)
-│       ├── checkout.zig     Worktree materialization (WASM export)
-│       └── r2_backend.zig   R2 storage backend for libgit2
-│   └── vendor/libdeflate/   Vendored libdeflate 1.25
-├── wasm/libgit2-wasm/       libgit2 compiled to WASM
-├── deps/libgit2/            libgit2 source (submodule)
-├── bin/
-│   ├── gitmode.mjs          CLI (npx gitmode init/deploy)
-│   └── template/            Scaffold templates for init
-├── src/
-│   ├── index.ts             npm main entry point
-│   ├── server.ts            Server entry point (full WASM)
-│   ├── client.ts            Client entry point (core WASM)
-│   ├── handler.ts           createHandler() factory (git + REST routing)
-│   ├── env.ts               Cloudflare env bindings type
-│   ├── git-engine.ts        R2 + DO SQLite orchestration (chunk storage, batch reads)
-│   ├── git-porcelain.ts     High-level git ops (merge, cherry-pick, stats)
-│   ├── wasm-engine.ts       Typed WASM wrapper (server)
-│   ├── wasm-engine-core.ts  Typed WASM wrapper (client)
-│   ├── repo-store.ts        Durable Object (per-repo SQLite)
-│   ├── pack-worker.ts       PackWorkerDO (fan-out packfile assembly)
-│   ├── upload-pack.ts       Clone/fetch handler (streaming response)
-│   ├── receive-pack.ts      Push handler + commit indexing + async worktree
-│   ├── checkout.ts          Worktree materialization (incremental + batched)
-│   ├── info-refs.ts         Ref advertisement
-│   ├── packfile-builder.ts  Assemble packfiles (local or fan-out to PackWorkerDO pool)
-│   ├── packfile-reader.ts   Unpack received packfiles (streaming R2 flushes)
-│   ├── pkt-line.ts          Git pkt-line protocol framing
-│   ├── ssh-handler.ts       SSH command parser
-│   └── hex.ts               Fast hex encoding (lookup table)
-├── worker/                  Cloudflare Worker entry (with vinext UI)
-├── app/                     vinext UI (React Server Components)
-├── test/
-│   ├── gitmode.test.ts      Integration tests (89 tests)
-│   ├── stress.sh            Stress test (100–10K files)
-│   ├── conformance.sh       Git protocol conformance (31 tests)
-│   └── bench.sh             Performance benchmarks
-├── docs/                    Astro Starlight documentation
-├── wrangler.jsonc           Cloudflare bindings
-└── package.json
+├── packages/                       # the toolkit (pnpm workspace)
+│   ├── prompt-blame/               # Worker + CLI + D1 schema
+│   ├── edge-compute-pool/          # PackWorkerDO + dispatchToPool
+│   └── wasm-git/                   # Zig WASM engines
+├── wasm/                           # Zig source for the WASM engines
+├── deps/libgit2/                   # libgit2 source for the full module
+├── docs/                           # Astro Starlight documentation site (mid-rewrite for the pivot)
+├── DESIGN-NOTES.md                 # pivot strategy + open R&D questions
+├── DISCLAIMER.md                   # personal-OSS / no-CF-affiliation statement
+└── pnpm-workspace.yaml
 ```
 
 ## License
 
-MIT
+MIT. See [LICENSE](./LICENSE).

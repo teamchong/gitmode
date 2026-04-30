@@ -1,0 +1,26 @@
+{
+  "name": "@gitmode/wasm-git",
+  "version": "0.0.1",
+  "description": "Zig-based WASM engine for git primitives: SHA-1 (SIMD128), zlib (libdeflate), delta, packfile",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": ["src/**/*.ts", "src/wasm/*.wasm"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.20",
+    "@cloudflare/workers-types": "^4.20250301.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.71.0"
+  }
+}

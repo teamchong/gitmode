@@ -1,0 +1,29 @@
+{
+  "name": "@gitmode/edge-compute-pool",
+  "version": "0.0.1",
+  "description": "Compute pool for fan-out git operations on Cloudflare Workers — diff, grep, walk, packfile build over a Durable Object slot pool",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": ["src/**/*.ts"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@gitmode/wasm-git": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.20",
+    "@cloudflare/workers-types": "^4.20250301.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.71.0"
+  }
+}
