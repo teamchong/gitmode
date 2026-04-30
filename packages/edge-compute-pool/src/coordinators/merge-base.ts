@@ -10,7 +10,7 @@
 // surface is `PackWorkerDO` + `dispatchToPool` + `parseCommitFromRaw` —
 // callers can compose any history-walk on top.
 
-import type { CommitInfo } from "../commit-parse";
+import { parseCommitsRPC } from "./pool-rpc";
 
 export interface CommitLocation {
   chunkKey?: string;
@@ -19,7 +19,7 @@ export interface CommitLocation {
   looseKey?: string;
 }
 
-/** Resolve a commit SHA to its R2 location. */
+/** Resolve any commit/tree/blob SHA to its R2 location. */
 export type CommitLookup = (sha: string) => CommitLocation | null;
 
 export interface MergeBaseOptions {
@@ -32,45 +32,6 @@ export interface MergeBaseOptions {
   maxDepth?: number;
   /** Slot name to use; defaults to "merge-base-{repoPath}". */
   slotName?: string;
-}
-
-interface ParseCommitsResponse {
-  results: CommitInfo[];
-  errors?: Array<{ sha: string; error: string }>;
-}
-
-async function parseCommitsRPC(
-  pool: DurableObjectNamespace,
-  slotName: string,
-  repoPath: string,
-  lookup: CommitLookup,
-  shas: string[],
-): Promise<CommitInfo[]> {
-  if (shas.length === 0) return [];
-
-  const commits = shas
-    .map((sha) => {
-      const loc = lookup(sha);
-      return loc ? { sha, ...loc } : null;
-    })
-    .filter((c): c is { sha: string } & CommitLocation => c !== null);
-
-  if (commits.length === 0) return [];
-
-  const id = pool.idFromName(slotName);
-  const worker = pool.get(id);
-  const res = await worker.fetch("http://do/", {
-    method: "POST",
-    headers: { "x-action": "parse-commits", "content-type": "application/json" },
-    body: JSON.stringify({ repoPath, commits }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`parse-commits returned ${res.status}: ${await res.text()}`);
-  }
-
-  const body = (await res.json()) as ParseCommitsResponse;
-  return body.results;
 }
 
 /**

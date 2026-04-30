@@ -44,6 +44,11 @@ export {
   logWalk,
   type LogWalkOptions,
 } from "./coordinators/log-walk";
+export {
+  blameWalk,
+  type BlameWalkOptions,
+  type BlameLine,
+} from "./coordinators/blame-walk";
 
 // Required by vitest-pool-workers / wrangler entry resolution.
 // This package is consumed as a library; the fetch handler returns 404 because

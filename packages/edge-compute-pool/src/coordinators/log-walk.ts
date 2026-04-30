@@ -7,6 +7,7 @@
 
 import type { CommitInfo } from "../commit-parse";
 import type { CommitLookup } from "./merge-base";
+import { parseCommitsRPC } from "./pool-rpc";
 
 export interface LogWalkOptions {
   /** Starting commits — typically [HEAD] or a branch tip. */
@@ -22,45 +23,6 @@ export interface LogWalkOptions {
   maxDepth?: number;
   /** Slot name override; defaults to `log-walk-{repoPath}`. */
   slotName?: string;
-}
-
-interface ParseCommitsResponse {
-  results: CommitInfo[];
-  errors?: Array<{ sha: string; error: string }>;
-}
-
-async function parseCommitsRPC(
-  pool: DurableObjectNamespace,
-  slotName: string,
-  repoPath: string,
-  lookup: CommitLookup,
-  shas: string[],
-): Promise<CommitInfo[]> {
-  if (shas.length === 0) return [];
-
-  const commits = shas
-    .map((sha) => {
-      const loc = lookup(sha);
-      return loc ? { sha, ...loc } : null;
-    })
-    .filter((c): c is { sha: string } & ReturnType<CommitLookup> & object => c !== null);
-
-  if (commits.length === 0) return [];
-
-  const id = pool.idFromName(slotName);
-  const worker = pool.get(id);
-  const res = await worker.fetch("http://do/", {
-    method: "POST",
-    headers: { "x-action": "parse-commits", "content-type": "application/json" },
-    body: JSON.stringify({ repoPath, commits }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`parse-commits returned ${res.status}: ${await res.text()}`);
-  }
-
-  const body = (await res.json()) as ParseCommitsResponse;
-  return body.results;
 }
 
 /**

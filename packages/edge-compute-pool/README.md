@@ -67,18 +67,19 @@ Each action validates that all R2 keys start with `repoPath/` (cross-repo isolat
 
 The action returns `{ sha, tree, parents, author, authorTimestamp, committer, committerTimestamp, summary, message }` per commit. A coordinator can compose this into:
 
-- **`mergeBase`** — alternating BFS from two seeds; **shipped** in `src/coordinators/merge-base.ts`.
-- **`logWalk`** — BFS from seeds with arbitrary filter predicate (author, message regex, date, etc.); **shipped** in `src/coordinators/log-walk.ts`.
-- **`blameWalk`** — BFS history of a path; for each level, diff old vs new blob to attribute lines. Not shipped; see DESIGN-NOTES Phase 4 for status.
+- **`mergeBase`** — alternating BFS from two seeds; in `src/coordinators/merge-base.ts`.
+- **`logWalk`** — BFS from seeds with arbitrary filter predicate (author, message regex, date, etc.); in `src/coordinators/log-walk.ts`.
+- **`blameWalk`** — first-parent walk of a path's history with per-line attribution; in `src/coordinators/blame-walk.ts`. POC quality (string-set line tracking, no rename/copy detection).
+
+All three share `src/coordinators/pool-rpc.ts` for the dispatch boilerplate so each coordinator is just the algorithm, not the plumbing.
 
 The coordinator owns the BFS loop; each level does one `parse-commits` RPC against a slot. Pool size scales with the BFS frontier width.
 
 ```ts
-import { mergeBase, logWalk } from "@gitmode/edge-compute-pool";
+import { mergeBase, logWalk, blameWalk } from "@gitmode/edge-compute-pool";
 
 const base = await mergeBase({
-  shaA: "...",
-  shaB: "...",
+  shaA: "...", shaB: "...",
   repoPath: "my-repo",
   lookup: (sha) => ({ looseKey: `my-repo/loose/${sha}` }),
   pool: env.PACK_WORKER,
@@ -92,6 +93,15 @@ const todos = await logWalk({
   filter: (c) => /TODO/.test(c.message),
   limit: 50,
 });
+
+const blame = await blameWalk({
+  startSha: headSha,
+  filePath: "src/foo.ts",
+  repoPath: "my-repo",
+  lookup,
+  pool: env.PACK_WORKER,
+});
+// → [{ lineNumber: 1, line: "...", commit: "abc..." }, ...]
 ```
 
 ## Pool sizing
