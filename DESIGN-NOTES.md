@@ -26,6 +26,18 @@ Captured in flight. These are the takeaways that justify the time spent.
 - **D1 isolates per-test** by default in `vitest-pool-workers`. Tests that POST then GET in separate `it()` blocks fail unexpectedly. Either disable isolation (`isolatedStorage: false`) or make each test self-contained.
 - **`r2.put` returns `Promise<R2Object | null>`**, not `Promise<void>`. Storing a list of fire-and-forget puts means `Promise<unknown>[]`.
 - **Loose objects vs chunk index** is a major design decision. Chunked R2 objects (~2MB) cut R2 op count 200×; loose objects make test setup easier. The `parse-commits` action supports both via the `looseKey` and `chunkKey + offset + length` discriminator on `ObjectDescriptor`.
+- **`miniflare.d1Databases` as a test-only override** is the right pattern for cross-package integration tests. The production binding doesn't need to exist — wire it only at the vitest config layer. Saved having to add D1 to edge-compute-pool's `wrangler.jsonc` purely for testability.
+
+### Git protocol implementation
+
+- **Sideband channel demultiplexing** (`side-band-64k`) is what makes a real git-upload-pack response readable. Each pkt-line in the response carries a leading channel byte: 0x01 = pack data, 0x02 = progress, 0x03 = error. Without sideband, pack bytes follow NAK directly and you lose the ability to surface server-side errors structurally. Worth implementing both paths.
+- **Pack v2 trailer verification before decode** caught a synthetic test where I'd flipped a bit. Doing the SHA-1 check before walking entries means corruption errors are unambiguous instead of surfacing as malformed-header errors deep in the parse loop.
+- **`git hash-object` for the empty file is `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`** — committing this canonical fixture as a test assertion is more durable than re-deriving it. Same for `"hello\n"` → `ce013625030ba8dba906f756967f9e9ca394464a`.
+- **Building synthetic packfiles in TS for tests** turned out to be ~30 lines (header + per-object zlib-compressed entry + SHA-1 trailer). Worth writing once; eliminated the need for any external git binary or libgit2 in test fixtures.
+
+### Composition validates the architecture
+
+The cross-package full-pipeline test (Artifacts fetch → blame → prompt-blame join) is the actual proof that the slot/coordinator/sidecar shape works. Each piece was independently tested earlier; gluing them showed the abstractions are the right ones — no awkward translation layer was needed between the packages, and the staged R2 layout (`${repoPath}/loose/${sha}`) connects every component.
 
 ### Strategic learnings
 
