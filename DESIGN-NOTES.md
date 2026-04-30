@@ -183,6 +183,7 @@ Executed in phases so each step is reversible.
 - [x] Extracted `commit-parse.ts` from the legacy `git-porcelain.ts` parser. 9 unit tests covering root commit, single parent, merge commit, separate author/committer, malformed body, multi-line summary.
 - [x] **Integration tests for `parse-commits`** — 8 tests exercising DO + R2 + WASM zlib end-to-end. Uses `node:zlib` (`nodejs_compat`) to pre-encode commit objects, writes them to R2, dispatches via `env.PACK_WORKER`. Resolved the cross-package WASM import limitation by adding `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]` to vitest config.
 - [x] **`mergeBase` coordinator** — `src/coordinators/merge-base.ts`. Alternating BFS from two seeds, dispatching one `parse-commits` RPC per level per side (parallel). 6 integration tests covering equal SHAs, ancestor relationship, siblings, deep LCA, disjoint histories, depth cap. Demonstrates the toolkit composition pattern.
+- [x] **`logWalk` coordinator** — `src/coordinators/log-walk.ts`. BFS from seeds with arbitrary filter predicate. 6 integration tests covering all reachable, empty seeds, limit, author filter, message regex (`git log -S` equivalent), depth cap.
 - [ ] Higher-level coordinator example: `merge-base` via BFS over `parse-commits`
 - [ ] `examples/grep-on-artifacts` — fan out grep across an Artifacts repo (deferred — needs Git smart HTTP client for fetching objects without staging in R2)
 - [ ] `examples/diff-on-artifacts` — same dependency, deferred

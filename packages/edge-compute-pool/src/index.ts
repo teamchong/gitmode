@@ -40,6 +40,10 @@ export {
   type CommitLookup,
   type CommitLocation,
 } from "./coordinators/merge-base";
+export {
+  logWalk,
+  type LogWalkOptions,
+} from "./coordinators/log-walk";
 
 // Required by vitest-pool-workers / wrangler entry resolution.
 // This package is consumed as a library; the fetch handler returns 404 because

@@ -66,21 +66,30 @@ Each action validates that all R2 keys start with `repoPath/` (cross-repo isolat
 
 The action returns `{ sha, tree, parents, author, authorTimestamp, committer, committerTimestamp, summary, message }` per commit. A coordinator can compose this into:
 
-- **`mergeBase`** — alternating BFS from two seeds; **shipped** in `src/coordinators/merge-base.ts` ([source](./src/coordinators/merge-base.ts)).
-- **`logWalk`** — BFS from `HEAD`, filter by author / message regex, optionally cap depth.
-- **`blameWalk`** — BFS history of a path; for each level, diff old vs new blob to attribute lines.
+- **`mergeBase`** — alternating BFS from two seeds; **shipped** in `src/coordinators/merge-base.ts`.
+- **`logWalk`** — BFS from seeds with arbitrary filter predicate (author, message regex, date, etc.); **shipped** in `src/coordinators/log-walk.ts`.
+- **`blameWalk`** — BFS history of a path; for each level, diff old vs new blob to attribute lines. Not shipped; see DESIGN-NOTES Phase 4 for status.
 
 The coordinator owns the BFS loop; each level does one `parse-commits` RPC against a slot. Pool size scales with the BFS frontier width.
 
 ```ts
-import { mergeBase } from "@gitmode/edge-compute-pool";
+import { mergeBase, logWalk } from "@gitmode/edge-compute-pool";
 
 const base = await mergeBase({
   shaA: "...",
   shaB: "...",
   repoPath: "my-repo",
-  lookup: (sha) => ({ looseKey: `my-repo/loose/${sha}` }), // or chunkKey + offset
+  lookup: (sha) => ({ looseKey: `my-repo/loose/${sha}` }),
   pool: env.PACK_WORKER,
+});
+
+const todos = await logWalk({
+  seeds: [headSha],
+  repoPath: "my-repo",
+  lookup,
+  pool: env.PACK_WORKER,
+  filter: (c) => /TODO/.test(c.message),
+  limit: 50,
 });
 ```
 
