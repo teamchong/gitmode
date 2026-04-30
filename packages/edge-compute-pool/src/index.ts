@@ -34,6 +34,12 @@ export {
   parseCommitFromRaw,
   type CommitInfo,
 } from "./commit-parse";
+export {
+  mergeBase,
+  type MergeBaseOptions,
+  type CommitLookup,
+  type CommitLocation,
+} from "./coordinators/merge-base";
 
 // Required by vitest-pool-workers / wrangler entry resolution.
 // This package is consumed as a library; the fetch handler returns 404 because

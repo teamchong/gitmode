@@ -66,11 +66,23 @@ Each action validates that all R2 keys start with `repoPath/` (cross-repo isolat
 
 The action returns `{ sha, tree, parents, author, authorTimestamp, committer, committerTimestamp, summary, message }` per commit. A coordinator can compose this into:
 
-- **`merge-base`** — BFS the parent graph from two seeds, intersect the visited sets, return the first common ancestor.
-- **`log-walk`** — BFS from `HEAD`, filter by author / message regex, optionally cap depth.
-- **`blame-walk`** — BFS history of a path; for each level, diff old vs new blob to attribute lines.
+- **`mergeBase`** — alternating BFS from two seeds; **shipped** in `src/coordinators/merge-base.ts` ([source](./src/coordinators/merge-base.ts)).
+- **`logWalk`** — BFS from `HEAD`, filter by author / message regex, optionally cap depth.
+- **`blameWalk`** — BFS history of a path; for each level, diff old vs new blob to attribute lines.
 
 The coordinator owns the BFS loop; each level does one `parse-commits` RPC against a slot. Pool size scales with the BFS frontier width.
+
+```ts
+import { mergeBase } from "@gitmode/edge-compute-pool";
+
+const base = await mergeBase({
+  shaA: "...",
+  shaB: "...",
+  repoPath: "my-repo",
+  lookup: (sha) => ({ looseKey: `my-repo/loose/${sha}` }), // or chunkKey + offset
+  pool: env.PACK_WORKER,
+});
+```
 
 ## Pool sizing
 
