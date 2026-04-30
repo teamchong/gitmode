@@ -1,17 +1,29 @@
-// Git smart HTTP client (protocol v1).
+// Git smart HTTP client (protocols v1 and v2).
 //
-// Two endpoints on a Git server:
+// V1 endpoints:
 //   GET  <url>/info/refs?service=git-upload-pack
-//        → pkt-line-encoded ref advertisement + capabilities
+//        → pkt-line ref advertisement + capabilities (refs and caps in one shot)
 //   POST <url>/git-upload-pack
-//        body: pkt-line-encoded "want <sha>" lines + flush + "done"
-//        → NAK + packfile (optionally sideband-64k multiplexed)
+//        body: pkt-line "want <sha>" lines + flush + "done"
+//        → NAK + sideband-multiplexed packfile
 //
-// Used by Artifacts integration to discover refs and fetch object closures.
+// V2 endpoints (negotiated via `Git-Protocol: version=2` header):
+//   GET  <url>/info/refs?service=git-upload-pack
+//        → pkt-line capability advertisement only (no refs)
+//   POST <url>/git-upload-pack
+//        body: command=ls-refs<delim>… or command=fetch<delim>want… <flush>
+//        → command-specific response
+//
+// `discoverRefs` and `fetchPack` auto-negotiate: they try v2 first if the
+// caller passes `protocolVersion: "auto"` (default) or explicitly via
+// `protocolVersion: "v2"`, falling back to v1 when the server doesn't
+// advertise v2 capability.
 
-import { encodePktLine, parsePktLines, FLUSH_PKT, concat } from "./pkt-line";
+import { encodePktLine, parsePktLines, FLUSH_PKT, DELIM_PKT, concat } from "./pkt-line";
 
 const decoder = new TextDecoder();
+
+export type ProtocolVersion = "auto" | "v1" | "v2";
 
 export interface SmartHttpOptions {
   /** Base repo URL — e.g. "https://x.artifacts.cloudflare.net/git/repo.git". */
@@ -22,6 +34,8 @@ export interface SmartHttpOptions {
   fetcher?: typeof fetch;
   /** Extra request headers (e.g. user-agent). */
   headers?: Record<string, string>;
+  /** "auto" tries v2 then falls back to v1 (default). "v1"/"v2" force one path. */
+  protocolVersion?: ProtocolVersion;
 }
 
 export interface RefAdvertisement {
@@ -49,27 +63,28 @@ function withAuth(headers: Record<string, string>, token?: string): Record<strin
 /**
  * GET /info/refs?service=git-upload-pack — returns the ref advertisement.
  *
- * Parses the v1 protocol response:
- *   001e# service=git-upload-pack\n
- *   0000  (flush — end of service header)
- *   <sha> HEAD\0<capabilities>\n
- *   <sha> refs/heads/main\n
- *   ...
- *   0000  (flush)
+ * Auto-negotiates between v1 and v2 based on `protocolVersion`:
+ *   - "auto" / "v2": sends `Git-Protocol: version=2`. If the server
+ *     responds with a v2 capability list, follows up with a v2 ls-refs
+ *     POST. Falls back to v1 parsing if the response is v1-shaped.
+ *   - "v1": skips the v2 header entirely and parses the response as v1.
  */
 export async function discoverRefs(opts: SmartHttpOptions): Promise<RefAdvertisement> {
   const fetcher = opts.fetcher ?? globalThis.fetch;
+  const requestVersion = opts.protocolVersion ?? "auto";
   const url = `${opts.url.replace(/\/$/, "")}/info/refs?service=git-upload-pack`;
+
+  const reqHeaders: Record<string, string> = {
+    Accept: "application/x-git-upload-pack-advertisement",
+    ...(opts.headers ?? {}),
+  };
+  if (requestVersion === "auto" || requestVersion === "v2") {
+    reqHeaders["Git-Protocol"] = "version=2";
+  }
 
   const res = await fetcher(url, {
     method: "GET",
-    headers: withAuth(
-      {
-        Accept: "application/x-git-upload-pack-advertisement",
-        ...(opts.headers ?? {}),
-      },
-      opts.token,
-    ),
+    headers: withAuth(reqHeaders, opts.token),
   });
 
   if (!res.ok) {
@@ -79,8 +94,24 @@ export async function discoverRefs(opts: SmartHttpOptions): Promise<RefAdvertise
   const body = new Uint8Array(await res.arrayBuffer());
   const sections = parsePktLines(body);
 
-  // V1 layout: first section is the service header (`# service=git-upload-pack`),
-  // second section is the actual ref advertisement.
+  // Detect v2: the first non-empty section's first line is `version 2\n`.
+  const firstNonEmpty = sections.find((s) => s.length > 0);
+  if (firstNonEmpty && firstNonEmpty.length > 0) {
+    const firstText = decoder.decode(firstNonEmpty[0]!).replace(/\n$/, "");
+    if (firstText === "version 2") {
+      const v2Caps = parseV2Capabilities(firstNonEmpty);
+      if (requestVersion !== "v1") {
+        // Issue ls-refs to actually fetch refs. Without it, v2 only gave us caps.
+        return await lsRefsV2(opts, v2Caps);
+      }
+    }
+  }
+
+  return parseV1RefAdvertisement(sections);
+}
+
+function parseV1RefAdvertisement(sections: Uint8Array[][]): RefAdvertisement {
+  // V1: first section is service header; second is the ref advertisement.
   const refSection = sections.length >= 2 && sections[1]!.length > 0 ? sections[1]! : sections[0]!;
 
   const refs = new Map<string, string>();
@@ -92,7 +123,6 @@ export async function discoverRefs(opts: SmartHttpOptions): Promise<RefAdvertise
     let text = decoder.decode(line);
     if (text.endsWith("\n")) text = text.slice(0, -1);
 
-    // First line carries capabilities after a NUL byte: "<sha> <ref>\0<caps>"
     let capsPart: string | undefined;
     if (firstLine) {
       firstLine = false;
@@ -107,7 +137,6 @@ export async function discoverRefs(opts: SmartHttpOptions): Promise<RefAdvertise
     if (spaceIdx === -1) continue;
     const sha = text.slice(0, spaceIdx);
     const refName = text.slice(spaceIdx + 1);
-
     if (!/^[0-9a-f]{40}$/.test(sha)) continue;
 
     if (refName === "HEAD") head = sha;
@@ -121,6 +150,96 @@ export async function discoverRefs(opts: SmartHttpOptions): Promise<RefAdvertise
   }
 
   return { refs, capabilities, head };
+}
+
+interface V2Capabilities {
+  /** Capabilities advertised by the server (e.g. "ls-refs", "fetch=shallow filter"). */
+  caps: Set<string>;
+  /** Per-capability arguments string when the cap takes args ("fetch=shallow filter" → ["shallow", "filter"]). */
+  capArgs: Map<string, string[]>;
+}
+
+function parseV2Capabilities(lines: Uint8Array[]): V2Capabilities {
+  const caps = new Set<string>();
+  const capArgs = new Map<string, string[]>();
+  for (const raw of lines) {
+    let text = decoder.decode(raw).replace(/\n$/, "");
+    if (text.length === 0) continue;
+    const eqIdx = text.indexOf("=");
+    if (eqIdx === -1) {
+      caps.add(text);
+    } else {
+      const name = text.slice(0, eqIdx);
+      caps.add(name);
+      capArgs.set(name, text.slice(eqIdx + 1).split(" ").filter(Boolean));
+    }
+  }
+  return { caps, capArgs };
+}
+
+/**
+ * V2 ls-refs command. POST git-upload-pack with a body containing
+ * `command=ls-refs\n` plus `peel`, `symrefs`, and ref-prefix args.
+ */
+async function lsRefsV2(
+  opts: SmartHttpOptions,
+  v2: V2Capabilities,
+): Promise<RefAdvertisement> {
+  const fetcher = opts.fetcher ?? globalThis.fetch;
+  const lines: Uint8Array[] = [
+    encodePktLine("command=ls-refs\n"),
+    encodePktLine("agent=gitmode-edge-compute\n"),
+    encodePktLine("object-format=sha1\n"),
+    DELIM_PKT,
+    encodePktLine("peel\n"),
+    encodePktLine("symrefs\n"),
+    encodePktLine("ref-prefix HEAD\n"),
+    encodePktLine("ref-prefix refs/heads/\n"),
+    encodePktLine("ref-prefix refs/tags/\n"),
+    FLUSH_PKT,
+  ];
+  const body = concat(lines);
+
+  const url = `${opts.url.replace(/\/$/, "")}/git-upload-pack`;
+  const res = await fetcher(url, {
+    method: "POST",
+    headers: withAuth(
+      {
+        "Content-Type": "application/x-git-upload-pack-request",
+        Accept: "application/x-git-upload-pack-result",
+        "Git-Protocol": "version=2",
+        ...(opts.headers ?? {}),
+      },
+      opts.token,
+    ),
+    body,
+  });
+
+  if (!res.ok) {
+    throw new Error(`v2 ls-refs returned ${res.status} ${res.statusText}`);
+  }
+
+  const respBody = new Uint8Array(await res.arrayBuffer());
+  const sections = parsePktLines(respBody);
+  const refLines = sections.find((s) => s.length > 0) ?? [];
+
+  const refs = new Map<string, string>();
+  let head: string | undefined;
+
+  for (const raw of refLines) {
+    const text = decoder.decode(raw).replace(/\n$/, "");
+    // Format: "<sha> <ref> [attribute1 attribute2 ...]"
+    // Attributes include "symref-target:<target>" and "peeled:<sha>".
+    const parts = text.split(" ");
+    if (parts.length < 2) continue;
+    const sha = parts[0]!;
+    const refName = parts[1]!;
+    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
+    if (refName === "HEAD") head = sha;
+    refs.set(refName, sha);
+  }
+
+  return { refs, capabilities: v2.caps, head };
 }
 
 export interface FetchPackOptions extends SmartHttpOptions {
@@ -148,13 +267,22 @@ export interface FetchPackResult {
 export async function fetchPack(opts: FetchPackOptions): Promise<FetchPackResult> {
   const fetcher = opts.fetcher ?? globalThis.fetch;
   if (opts.wants.length === 0) throw new Error("fetchPack: at least one want SHA required");
+  for (const sha of opts.wants) {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`fetchPack: invalid sha ${sha}`);
+  }
 
+  const requestVersion = opts.protocolVersion ?? "auto";
+  if (requestVersion === "v2") {
+    return fetchPackV2(opts);
+  }
+
+  // V1 (default for "auto" since most servers still accept it; callers who
+  // want v2 should pass protocolVersion: "v2" explicitly).
   const caps = opts.capabilities ?? ["side-band-64k", "agent=gitmode-edge-compute"];
 
   const lines: Uint8Array[] = [];
   for (let i = 0; i < opts.wants.length; i++) {
     const sha = opts.wants[i]!;
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`fetchPack: invalid sha ${sha}`);
     const wantLine = i === 0 ? `want ${sha} ${caps.join(" ")}\n` : `want ${sha}\n`;
     lines.push(encodePktLine(wantLine));
   }
@@ -183,6 +311,106 @@ export async function fetchPack(opts: FetchPackOptions): Promise<FetchPackResult
 
   const responseBody = new Uint8Array(await res.arrayBuffer());
   return demuxSideband(responseBody, caps.includes("side-band-64k"));
+}
+
+/**
+ * V2 fetch command. POST git-upload-pack with `command=fetch` body and
+ * Git-Protocol: version=2 header. Response framing: `packfile\n` line
+ * followed by sideband-multiplexed packfile data, terminated by flush.
+ */
+async function fetchPackV2(opts: FetchPackOptions): Promise<FetchPackResult> {
+  const fetcher = opts.fetcher ?? globalThis.fetch;
+
+  const lines: Uint8Array[] = [
+    encodePktLine("command=fetch\n"),
+    encodePktLine("agent=gitmode-edge-compute\n"),
+    encodePktLine("object-format=sha1\n"),
+    DELIM_PKT,
+    encodePktLine("ofs-delta\n"),
+    // V2 fetch uses sideband-all by default; no need to opt in via capability.
+  ];
+  for (const sha of opts.wants) {
+    lines.push(encodePktLine(`want ${sha}\n`));
+  }
+  lines.push(encodePktLine("done\n"));
+  lines.push(FLUSH_PKT);
+
+  const body = concat(lines);
+  const url = `${opts.url.replace(/\/$/, "")}/git-upload-pack`;
+
+  const res = await fetcher(url, {
+    method: "POST",
+    headers: withAuth(
+      {
+        "Content-Type": "application/x-git-upload-pack-request",
+        Accept: "application/x-git-upload-pack-result",
+        "Git-Protocol": "version=2",
+        ...(opts.headers ?? {}),
+      },
+      opts.token,
+    ),
+    body,
+  });
+
+  if (!res.ok) {
+    throw new Error(`v2 fetch returned ${res.status} ${res.statusText}`);
+  }
+
+  const responseBody = new Uint8Array(await res.arrayBuffer());
+  return demuxSidebandV2(responseBody);
+}
+
+/**
+ * V2 fetch response demux. The body starts with a `packfile\n` indicator line
+ * (or potentially `acknowledgments\n` / `shallow-info\n` sections we skip),
+ * then sideband-multiplexed pack data: 0x01 = pack, 0x02 = progress, 0x03 = error.
+ */
+function demuxSidebandV2(body: Uint8Array): FetchPackResult {
+  const packChunks: Uint8Array[] = [];
+  let progress = "";
+  let errors = "";
+
+  let offset = 0;
+  let inPackfileSection = false;
+
+  while (offset < body.length) {
+    if (offset + 4 > body.length) break;
+    const lenHex = decoder.decode(body.subarray(offset, offset + 4));
+    if (lenHex === "0000") {
+      offset += 4;
+      // Section terminator. If we were in the packfile section, we're done.
+      if (inPackfileSection) break;
+      continue;
+    }
+    if (lenHex === "0001" || lenHex === "0002") {
+      offset += 4;
+      continue;
+    }
+    const totalLen = parseInt(lenHex, 16);
+    if (isNaN(totalLen) || totalLen < 4) break;
+    if (offset + totalLen > body.length) break;
+
+    const payload = body.subarray(offset + 4, offset + totalLen);
+    offset += totalLen;
+
+    if (!inPackfileSection) {
+      const text = decoder.decode(payload).replace(/\n$/, "");
+      if (text === "packfile") {
+        inPackfileSection = true;
+      }
+      // Other section headers (acknowledgments, shallow-info) — ignored.
+      continue;
+    }
+
+    // In the packfile section, every data line is sideband-channel-prefixed.
+    const channel = payload[0];
+    const data = payload.subarray(1);
+    if (channel === 1) packChunks.push(data);
+    else if (channel === 2) progress += decoder.decode(data);
+    else if (channel === 3) errors += decoder.decode(data);
+  }
+
+  return { pack: concat(packChunks), progress, errors };
 }
 
 /**

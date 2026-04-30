@@ -204,3 +204,190 @@ describe("fetchPack", () => {
     expect(text.match(/want \w{40}/g)?.length ?? 0).toBe(2);
   });
 });
+
+describe("Git protocol v2", () => {
+  it("auto-detects v2 from info/refs, then issues ls-refs to get the actual refs", async () => {
+    let infoRefsCalled = false;
+    let lsRefsBody: Uint8Array | null = null;
+    let sentVersionHeader: string | null = null;
+
+    const fetcher = makeFetcher(async (req) => {
+      const url = new URL(req.url);
+
+      if (req.method === "GET" && url.pathname.endsWith("/info/refs")) {
+        infoRefsCalled = true;
+        sentVersionHeader = req.headers.get("git-protocol");
+        // V2 capability advertisement: just the capabilities, no refs.
+        return new Response(
+          concat([
+            encodePktLine("version 2\n"),
+            encodePktLine("agent=git/2.42\n"),
+            encodePktLine("ls-refs=unborn\n"),
+            encodePktLine("fetch=shallow filter\n"),
+            encodePktLine("object-format=sha1\n"),
+            FLUSH_PKT,
+          ]),
+        );
+      }
+
+      if (req.method === "POST" && url.pathname.endsWith("/git-upload-pack")) {
+        lsRefsBody = new Uint8Array(await req.arrayBuffer());
+        // V2 ls-refs response: ref lines + flush
+        return new Response(
+          concat([
+            encodePktLine(`${SHA_HEAD} HEAD symref-target:refs/heads/main\n`),
+            encodePktLine(`${SHA_MAIN} refs/heads/main\n`),
+            encodePktLine(`${SHA_DEV} refs/heads/dev\n`),
+            FLUSH_PKT,
+          ]),
+        );
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+
+    const adv = await discoverRefs({
+      url: "https://example.com/git/repo.git",
+      fetcher,
+    });
+
+    expect(infoRefsCalled).toBe(true);
+    expect(sentVersionHeader).toBe("version=2");
+    expect(adv.head).toBe(SHA_HEAD);
+    expect(adv.refs.get("refs/heads/main")).toBe(SHA_MAIN);
+    expect(adv.refs.get("refs/heads/dev")).toBe(SHA_DEV);
+    expect(adv.capabilities.has("ls-refs")).toBe(true);
+    expect(adv.capabilities.has("fetch")).toBe(true);
+
+    // Verify the ls-refs request body shape
+    expect(lsRefsBody).not.toBeNull();
+    const lsRefsText = new TextDecoder().decode(lsRefsBody!);
+    expect(lsRefsText).toContain("command=ls-refs");
+    expect(lsRefsText).toContain("ref-prefix HEAD");
+    expect(lsRefsText).toContain("ref-prefix refs/heads/");
+  });
+
+  it("falls back to v1 when the server doesn't advertise version 2", async () => {
+    const fetcher = makeFetcher((req) => {
+      const url = new URL(req.url);
+      if (req.method === "GET" && url.pathname.endsWith("/info/refs")) {
+        // Plain v1 advertisement — no `version 2` line
+        return new Response(
+          concat([
+            encodePktLine("# service=git-upload-pack\n"),
+            FLUSH_PKT,
+            encodePktLine(`${SHA_HEAD} HEAD\0multi_ack side-band-64k\n`),
+            encodePktLine(`${SHA_MAIN} refs/heads/main\n`),
+            FLUSH_PKT,
+          ]),
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const adv = await discoverRefs({
+      url: "https://example.com/git/repo.git",
+      fetcher,
+    });
+
+    expect(adv.head).toBe(SHA_HEAD);
+    expect(adv.refs.get("refs/heads/main")).toBe(SHA_MAIN);
+    expect(adv.capabilities.has("multi_ack")).toBe(true);
+  });
+
+  it("respects protocolVersion: 'v1' (skips v2 negotiation entirely)", async () => {
+    let sentVersionHeader: string | null = null;
+    const fetcher = makeFetcher((req) => {
+      sentVersionHeader = req.headers.get("git-protocol");
+      return new Response(
+        concat([
+          encodePktLine("# service=git-upload-pack\n"),
+          FLUSH_PKT,
+          encodePktLine(`${SHA_HEAD} HEAD\0\n`),
+          FLUSH_PKT,
+        ]),
+      );
+    });
+
+    await discoverRefs({
+      url: "https://example.com/git/repo.git",
+      fetcher,
+      protocolVersion: "v1",
+    });
+
+    expect(sentVersionHeader).toBeNull();
+  });
+
+  it("v2 fetch sends `command=fetch` body with want lines + Git-Protocol header", async () => {
+    let seenBody: Uint8Array | null = null;
+    let sentVersionHeader: string | null = null;
+
+    const fakePack = new TextEncoder().encode("PACK-fake-v2");
+    const sideband = new Uint8Array(1 + fakePack.length);
+    sideband[0] = 0x01;
+    sideband.set(fakePack, 1);
+
+    const fetcher = makeFetcher(async (req) => {
+      seenBody = new Uint8Array(await req.arrayBuffer());
+      sentVersionHeader = req.headers.get("git-protocol");
+      return new Response(
+        concat([
+          encodePktLine("packfile\n"),
+          encodePktLineBytes(sideband),
+          FLUSH_PKT,
+        ]),
+      );
+    });
+
+    const result = await fetchPack({
+      url: "https://example.com/git/repo.git",
+      wants: [SHA_HEAD],
+      fetcher,
+      protocolVersion: "v2",
+    });
+
+    expect(sentVersionHeader).toBe("version=2");
+    expect(seenBody).not.toBeNull();
+    const text = new TextDecoder().decode(seenBody!);
+    expect(text).toContain("command=fetch");
+    expect(text).toContain(`want ${SHA_HEAD}`);
+    expect(text).toContain("done");
+
+    // Verify pack got demuxed correctly through the v2 packfile section
+    expect(new TextDecoder().decode(result.pack)).toBe("PACK-fake-v2");
+  });
+
+  it("v2 fetch separates progress and error sideband channels", async () => {
+    const errMsg = "remote: cannot find object\n";
+    const errPayload = new Uint8Array(1 + new TextEncoder().encode(errMsg).length);
+    errPayload[0] = 0x03;
+    errPayload.set(new TextEncoder().encode(errMsg), 1);
+
+    const progMsg = "counting objects: 12";
+    const progPayload = new Uint8Array(1 + new TextEncoder().encode(progMsg).length);
+    progPayload[0] = 0x02;
+    progPayload.set(new TextEncoder().encode(progMsg), 1);
+
+    const fetcher = makeFetcher(() =>
+      new Response(
+        concat([
+          encodePktLine("packfile\n"),
+          encodePktLineBytes(progPayload),
+          encodePktLineBytes(errPayload),
+          FLUSH_PKT,
+        ]),
+      ),
+    );
+
+    const result = await fetchPack({
+      url: "https://example.com/git/repo.git",
+      wants: [SHA_HEAD],
+      fetcher,
+      protocolVersion: "v2",
+    });
+
+    expect(result.progress).toBe(progMsg);
+    expect(result.errors).toBe(errMsg);
+    expect(result.pack.length).toBe(0);
+  });
+});

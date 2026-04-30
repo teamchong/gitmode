@@ -163,7 +163,7 @@ The integration test (`test/artifacts-fetch.integration.test.ts`) stands up an i
 - Unpack is **not** fan-out-able — delta chains require ordering within a packfile.
 - One coordinator can saturate ~20 slots; beyond that you're better off sharding work across multiple coordinators.
 - The package depends on `@gitmode/wasm-git` for SHA-1, zlib, delta, packfile primitives. Cross-package WASM imports under `vitest-pool-workers` require `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]` in the consumer's `vitest.config.ts` (already wired up in this package's own tests).
-- Smart-HTTP client targets Git protocol v1 (which Artifacts also supports). Protocol v2 (`Git-Protocol: version=2`) would need a separate ls-refs / fetch command implementation and is not shipped.
+- Smart-HTTP client supports both Git protocol v1 and v2 (`Git-Protocol: version=2`). `discoverRefs` auto-negotiates: it sends the v2 header by default, follows up with a v2 ls-refs POST when the server advertises `version 2`, and falls back to v1 parsing otherwise. `fetchPack` defaults to v1 (works with all servers) but accepts `protocolVersion: "v2"` to use v2 fetch instead.
 
 ## Status / extraction
 
