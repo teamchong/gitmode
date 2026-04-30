@@ -11,8 +11,6 @@ overrides:
   postcss: '>=8.5.10'
   undici: '>=7.24.0'
 
-pnpmfileChecksum: sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
-
 importers:
 
   .:
