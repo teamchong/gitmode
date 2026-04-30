@@ -91,7 +91,7 @@ Below the threshold (200 objects for packfile, 10 for diff, 50 for grep) the loc
 
 - Unpack is **not** fan-out-able — delta chains require ordering within a packfile.
 - One coordinator can saturate ~20 slots; beyond that you're better off sharding work across multiple coordinators.
-- The package depends on `@gitmode/wasm-git` for SHA-1, zlib, delta, packfile primitives. Cross-package WASM imports under `vitest-pool-workers` need the `CompiledWasm` rule above.
+- The package depends on `@gitmode/wasm-git` for SHA-1, zlib, delta, packfile primitives. Cross-package WASM imports under `vitest-pool-workers` require `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]` in the consumer's `vitest.config.ts` (already wired up in this package's own tests).
 
 ## Status / extraction
 

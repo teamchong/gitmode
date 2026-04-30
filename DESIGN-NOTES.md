@@ -181,6 +181,7 @@ Executed in phases so each step is reversible.
 ### Phase 4 — Edge compute pool extensions (Bet 2)
 - [x] New pool action: `parse-commits` — read commit objects from R2, return structured `CommitInfo[]`. The primitive that powers `merge-base`, `log-walk`, and `blame-walk` from coordinator-side BFS.
 - [x] Extracted `commit-parse.ts` from the legacy `git-porcelain.ts` parser. 9 unit tests covering root commit, single parent, merge commit, separate author/committer, malformed body, multi-line summary.
+- [x] **Integration tests for `parse-commits`** — 8 tests exercising DO + R2 + WASM zlib end-to-end. Uses `node:zlib` (`nodejs_compat`) to pre-encode commit objects, writes them to R2, dispatches via `env.PACK_WORKER`. Resolved the cross-package WASM import limitation by adding `test.deps.optimizer.ssr.include: ["@gitmode/wasm-git"]` to vitest config.
 - [ ] Higher-level coordinator example: `merge-base` via BFS over `parse-commits`
 - [ ] `examples/grep-on-artifacts` — fan out grep across an Artifacts repo (deferred — needs Git smart HTTP client for fetching objects without staging in R2)
 - [ ] `examples/diff-on-artifacts` — same dependency, deferred

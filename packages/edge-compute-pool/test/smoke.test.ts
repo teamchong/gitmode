@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-// Importing individual modules avoids pulling pack-worker (and its transitive
-// @gitmode/wasm-git WASM dependency) into the smoke test bundle. Cross-package
-// .wasm resolution under vitest-pool-workers requires extra miniflare config;
-// these tests cover the pure-JS surface that doesn't need a WASM engine.
+import * as ecp from "../src/index";
 import {
   OBJ_BLOB,
   OBJ_TREE,
@@ -12,29 +9,20 @@ import {
   typeSizeHeaderLen,
   writeTypeSizeHeader,
   writeUint32BE,
-} from "../src/pack-format";
-import { isBinary, unifiedDiff } from "../src/diff-engine";
-import {
+  isBinary,
+  unifiedDiff,
   batchForPool,
-  resolveMaxSlots,
-} from "../src/compute-pool";
+} from "../src/index";
 
-describe("module surface", () => {
-  it("exports pack-format helpers", () => {
-    expect(objectToPackType).toBeTypeOf("function");
-    expect(typeSizeHeaderLen).toBeTypeOf("function");
-    expect(writeTypeSizeHeader).toBeTypeOf("function");
-    expect(writeUint32BE).toBeTypeOf("function");
-  });
-
-  it("exports diff-engine helpers", () => {
-    expect(unifiedDiff).toBeTypeOf("function");
-    expect(isBinary).toBeTypeOf("function");
-  });
-
-  it("exports compute-pool helpers", () => {
-    expect(batchForPool).toBeTypeOf("function");
-    expect(resolveMaxSlots).toBeTypeOf("function");
+describe("package exports", () => {
+  it("exposes the public surface from index", () => {
+    expect(ecp.PackWorkerDO).toBeDefined();
+    expect(ecp.dispatchToPool).toBeTypeOf("function");
+    expect(ecp.batchForPool).toBeTypeOf("function");
+    expect(ecp.unifiedDiff).toBeTypeOf("function");
+    expect(ecp.isBinary).toBeTypeOf("function");
+    expect(ecp.parseCommitBody).toBeTypeOf("function");
+    expect(ecp.parseCommitFromRaw).toBeTypeOf("function");
   });
 });
 
