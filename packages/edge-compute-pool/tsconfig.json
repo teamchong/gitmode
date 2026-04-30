@@ -13,5 +13,5 @@
     "resolveJsonModule": true,
     "allowArbitraryExtensions": true
   },
-  "include": ["src/**/*", "test/**/*", "vitest.config.ts"]
+  "include": ["src/**/*", "test/**/*", "examples/**/*", "vitest.config.ts"]
 }
