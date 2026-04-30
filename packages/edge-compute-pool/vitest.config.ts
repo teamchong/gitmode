@@ -5,6 +5,11 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 // so workerd can resolve them. Without this, cross-package .wasm imports fail
 // with "No such module ... ?mf_vitest_force=CompiledWasm". See
 // https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/#module-resolution
+//
+// `miniflare.d1Databases` is a test-only binding override. In production this
+// package doesn't need D1 — it only shows up here so the cross-package
+// integration test (full-pipeline.integration.test.ts) can verify that
+// blame results join cleanly with prompt-blame's schema.
 export default defineWorkersConfig({
   test: {
     deps: {
@@ -18,6 +23,9 @@ export default defineWorkersConfig({
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.jsonc" },
+        miniflare: {
+          d1Databases: ["PROMPT_BLAME_DB"],
+        },
       },
     },
   },
