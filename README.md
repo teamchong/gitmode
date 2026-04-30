@@ -111,7 +111,7 @@ pnpm run build:wasm        # gitmode.wasm (full + libgit2)
 pnpm run build:wasm-core   # gitmode-core.wasm (lightweight)
 ```
 
-Requires Zig 0.15.2, `wasm-metadce`, `wasm-opt`. See the [package README](./packages/wasm-git#building-wasm-from-source) for known build-environment caveats.
+Requires Zig 0.16, `wasm-metadce`, `wasm-opt`. See the [package README](./packages/wasm-git#building-wasm-from-source) for build details.
 
 ## Project structure
 

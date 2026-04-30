@@ -50,6 +50,17 @@ export fn getHeapUsed() usize {
     return heap.offset;
 }
 
+// Pre-allocated scratch ABI: callers checkpoint after the scratch region
+// is laid out, then `heapRestore` rolls back only dynamic allocations
+// between calls — preserving the scratch I/O buffer.
+export fn heapSave() usize {
+    return heap.offset;
+}
+
+export fn heapRestore(offset: usize) void {
+    heap.offset = offset;
+}
+
 // ============================================================
 // SHA-1 hashing (SIMD-accelerated)
 // ============================================================

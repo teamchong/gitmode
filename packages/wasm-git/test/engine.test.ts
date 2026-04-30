@@ -1,15 +1,17 @@
-// End-to-end engine tests: instantiate WasmEngine and exercise real
-// WASM paths (SHA-1, zlib, hash-object). These verify the committed
-// gitmode.wasm binary, the WASI shims, and the pre-allocated scratch
-// ABI all work together.
+// End-to-end engine tests: instantiate both WasmEngine flavors and
+// exercise real WASM paths (SHA-1, zlib, hash-object). These verify the
+// committed .wasm binaries, the WASI shims, and the pre-allocated
+// scratch ABI all work together.
 
 import { describe, expect, it, beforeAll } from "vitest";
-import { WasmEngine, toHex } from "../src/index";
+import { WasmEngine, WasmEngineCore, toHex } from "../src/index";
 
 let engine: WasmEngine;
+let coreEngine: WasmEngineCore;
 
 beforeAll(async () => {
   engine = await WasmEngine.create();
+  coreEngine = await WasmEngineCore.create();
 });
 
 describe("WasmEngine.sha1Hex", () => {
@@ -111,5 +113,35 @@ describe("WasmEngine heap management", () => {
     // Heap may have grown by some constant (e.g., one allocation that escaped),
     // but should not have grown by 50x the per-call work.
     expect(after - before).toBeLessThan(1024 * 1024);
+  });
+});
+
+describe("WasmEngineCore (lightweight, no libgit2)", () => {
+  it("instantiates without the libgit2 host imports", () => {
+    expect(coreEngine).toBeDefined();
+  });
+
+  it("computes SHA-1 of empty input", () => {
+    const sha = coreEngine.sha1Hex(new Uint8Array(0));
+    expect(sha).toBe("da39a3ee5e6b4b0d3255bfef95601890afd80709");
+  });
+
+  it("computes SHA-1 of 'hello'", () => {
+    const sha = coreEngine.sha1Hex(new TextEncoder().encode("hello"));
+    expect(sha).toBe("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+  });
+
+  it("hashAndDeflate produces a git-compatible blob hash", () => {
+    const content = new TextEncoder().encode("hello\n");
+    const header = new TextEncoder().encode(`blob ${content.length}\0`);
+    const result = coreEngine.hashAndDeflate(/* OBJ_BLOB */ 1, content, header);
+    expect(toHex(result.sha1)).toBe("ce013625030ba8dba906f756967f9e9ca394464a");
+  });
+
+  it("zlib round-trip on small text", () => {
+    const original = new TextEncoder().encode("abcdefghijklmnopqrstuvwxyz\n");
+    const deflated = coreEngine.zlibDeflate(original);
+    const inflated = coreEngine.zlibInflate(deflated, original.length);
+    expect(new TextDecoder().decode(inflated)).toBe(new TextDecoder().decode(original));
   });
 });

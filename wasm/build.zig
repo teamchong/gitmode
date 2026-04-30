@@ -27,9 +27,11 @@ pub fn build(b: *std.Build) void {
     // Stack size: 4MB (libgit2 operations can be deeply recursive)
     wasm.stack_size = 4 * 1024 * 1024;
 
-    // Link libgit2 static library (compiled with zig cc for wasm32-wasi)
-    wasm.addObjectFile(b.path("libgit2-wasm/out/libgit2.a"));
-    wasm.addIncludePath(b.path("../deps/libgit2/include"));
+    // Link libgit2 static library (compiled with zig cc for wasm32-wasi).
+    // In Zig 0.16, link inputs and include paths attach to the module, not the
+    // Compile step directly — same pattern addLibdeflate uses below.
+    wasm.root_module.addObjectFile(b.path("libgit2-wasm/out/libgit2.a"));
+    wasm.root_module.addIncludePath(b.path("../deps/libgit2/include"));
 
     // Link libdeflate (vendored C sources, replaces Zig's std.compress.flate)
     addLibdeflate(b, wasm.root_module);

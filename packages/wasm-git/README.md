@@ -51,9 +51,9 @@ pnpm run build:wasm        # gitmode.wasm (full + libgit2)
 pnpm run build:wasm-core   # gitmode-core.wasm (lightweight)
 ```
 
-Requires Zig 0.15.2. `wasm-metadce` and `wasm-opt` from binaryen.
+Requires Zig 0.16. `wasm-metadce` and `wasm-opt` from binaryen.
 
-> **Known gotcha.** The committed `gitmode-core.wasm` lags the TypeScript wrappers — it predates the `heapSave` / `heapRestore` exports added in commit `10f17f7`. `WasmEngineCore.create()` will currently throw `heapSave is not a function`. Rebuild via `pnpm run build:wasm-core` to fix. The full `gitmode.wasm` is current and `WasmEngine.create()` works (proven by the `engine.test.ts` integration tests in this package).
+The committed binaries are built with Zig 0.16 and exercised end-to-end by the `engine.test.ts` integration tests — both `WasmEngine` (full module with libgit2) and `WasmEngineCore` (lightweight) instantiate, hash bytes against canonical SHA-1 fixtures, deflate/inflate round-trip cleanly, and prove the pre-allocated scratch ABI keeps heap growth bounded across repeated calls.
 
 ## Status
 
