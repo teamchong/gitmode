@@ -49,7 +49,7 @@ export default {
 
 ## Built-in actions
 
-`PackWorkerDO` ships six RPC actions:
+`PackWorkerDO` ships seven RPC actions:
 
 | Action | Reads | Computes | Returns |
 |---|---|---|---|
@@ -59,6 +59,7 @@ export default {
 | `grep-blobs` | blobs from R2 | regex search with context | matches |
 | `walk-trees` | tree objects from R2 | parse entries | child SHAs |
 | `parse-commits` | commit objects from R2 | decompress, parse header + summary | structured `CommitInfo[]` |
+| `read-blobs` | blob objects from R2 | decompress, validate type | base64 content + size, capped at `maxBlobBytes` (default 1MB, hard max 8MB) |
 
 Each action validates that all R2 keys start with `repoPath/` (cross-repo isolation) and caps batches at 1000 objects (OOM defense).
 

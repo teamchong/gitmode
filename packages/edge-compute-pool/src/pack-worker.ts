@@ -130,6 +130,21 @@ interface CommitParseRequest {
   commits: CommitParseEntry[];
 }
 
+interface ReadBlobEntry {
+  sha: string;
+  chunkKey?: string;
+  offset?: number;
+  length?: number;
+  looseKey?: string;
+}
+
+interface ReadBlobsRequest {
+  repoPath: string;
+  blobs: ReadBlobEntry[];
+  /** Per-blob cap. Default 1MB, hard max 8MB. */
+  maxBlobBytes?: number;
+}
+
 function nameToType(name: string): number {
   switch (name) {
     case "blob": return OBJ_BLOB;
@@ -164,6 +179,8 @@ export class PackWorkerDO extends DurableObject<PackWorkerEnv> {
         return this.handleWalkTrees(request);
       case "parse-commits":
         return this.handleParseCommits(request);
+      case "read-blobs":
+        return this.handleReadBlobs(request);
       default:
         return new Response("Unknown action\n", { status: 400 });
     }
@@ -637,6 +654,86 @@ export class PackWorkerDO extends DurableObject<PackWorkerEnv> {
         continue;
       }
       results.push(info);
+    }
+
+    return Response.json({ results, errors });
+  }
+
+  // === read-blobs: decompress blob objects, return raw content as base64 ===
+
+  private async handleReadBlobs(request: Request): Promise<Response> {
+    const body = (await request.json()) as ReadBlobsRequest;
+    const { repoPath, blobs } = body;
+    if (!repoPath || typeof repoPath !== "string") {
+      return new Response("Missing repoPath\n", { status: 400 });
+    }
+    if (!blobs || blobs.length === 0) {
+      return Response.json({ results: [] });
+    }
+    if (blobs.length > MAX_OBJECTS_PER_BATCH) {
+      return new Response("Too many blobs\n", { status: 400 });
+    }
+
+    const HARD_MAX = 8 * 1024 * 1024;
+    const maxBytes = Math.min(body.maxBlobBytes ?? 1024 * 1024, HARD_MAX);
+
+    const repoPrefix = repoPath + "/";
+    for (const b of blobs) {
+      if (b.chunkKey && !b.chunkKey.startsWith(repoPrefix)) {
+        return new Response("Invalid key scope\n", { status: 400 });
+      }
+      if (b.looseKey && !b.looseKey.startsWith(repoPrefix)) {
+        return new Response("Invalid key scope\n", { status: 400 });
+      }
+    }
+
+    const wasm = await this.getWasm();
+    const r2 = this.env.OBJECTS;
+
+    const allChunkKeys = new Set<string>();
+    for (const b of blobs) {
+      if (b.chunkKey) allChunkKeys.add(b.chunkKey);
+    }
+    const chunkData = await this.fetchChunks(r2, [...allChunkKeys]);
+
+    const results: Array<{ sha: string; size: number; contentBase64: string }> = [];
+    const errors: Array<{ sha: string; error: string }> = [];
+
+    for (const blob of blobs) {
+      const raw = await this.readRawObject(wasm, r2, chunkData, blob);
+      if (!raw) {
+        errors.push({ sha: blob.sha, error: "object not found" });
+        continue;
+      }
+      const nullIdx = raw.indexOf(0x00);
+      const spaceIdx = raw.indexOf(0x20);
+      if (nullIdx === -1 || spaceIdx === -1 || spaceIdx > nullIdx) {
+        errors.push({ sha: blob.sha, error: "malformed git object header" });
+        continue;
+      }
+      const type = decoder.decode(raw.subarray(0, spaceIdx));
+      if (type !== "blob") {
+        errors.push({ sha: blob.sha, error: `not a blob (got ${type})` });
+        continue;
+      }
+      const content = raw.subarray(nullIdx + 1);
+      if (content.length > maxBytes) {
+        errors.push({
+          sha: blob.sha,
+          error: `blob exceeds maxBlobBytes (${content.length} > ${maxBytes})`,
+        });
+        continue;
+      }
+
+      // Encode bytes → base64 via Buffer (nodejs_compat). Avoids the
+      // call-stack overflow you'd hit with String.fromCharCode(...content).
+      const contentBase64 = Buffer.from(
+        content.buffer,
+        content.byteOffset,
+        content.byteLength,
+      ).toString("base64");
+
+      results.push({ sha: blob.sha, size: content.length, contentBase64 });
     }
 
     return Response.json({ results, errors });
