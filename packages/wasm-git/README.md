@@ -8,19 +8,20 @@ Zig-based WASM engine for git primitives: SHA-1 with SIMD128, zlib via libdeflat
 ## Usage
 
 ```ts
-import { WasmEngineCore } from "@gitmode/wasm-git";
+import { WasmEngine, toHex } from "@gitmode/wasm-git";
 
-const engine = await WasmEngineCore.create();
+const engine = await WasmEngine.create();
 
 // SHA-1 of arbitrary bytes
 const sha = engine.sha1Hex(new TextEncoder().encode("hello"));
+// → "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
 
 // Hash + deflate a git object in one pass (zero-copy scratch ABI)
-const result = engine.hashAndDeflate(
-  /* type: blob */ 3,
-  content,
-  new TextEncoder().encode(`blob ${content.length}\0`),
-);
+const content = new TextEncoder().encode("hello\n");
+const header = new TextEncoder().encode(`blob ${content.length}\0`);
+const result = engine.hashAndDeflate(/* OBJ_BLOB */ 1, content, header);
+// toHex(result.sha1) === "ce013625030ba8dba906f756967f9e9ca394464a"
+//                       (matches `git hash-object <(printf 'hello\n')`)
 ```
 
 ## Architecture
@@ -52,7 +53,7 @@ pnpm run build:wasm-core   # gitmode-core.wasm (lightweight)
 
 Requires Zig 0.15.2. `wasm-metadce` and `wasm-opt` from binaryen.
 
-> **Known gotcha.** The committed `gitmode-core.wasm` may lag the TypeScript wrappers if Zig exports are added without a re-build. If `WasmEngineCore.create()` throws `heapSave is not a function`, rebuild the core WASM. The full `gitmode.wasm` is rebuilt more often and is current.
+> **Known gotcha.** The committed `gitmode-core.wasm` lags the TypeScript wrappers — it predates the `heapSave` / `heapRestore` exports added in commit `10f17f7`. `WasmEngineCore.create()` will currently throw `heapSave is not a function`. Rebuild via `pnpm run build:wasm-core` to fix. The full `gitmode.wasm` is current and `WasmEngine.create()` works (proven by the `engine.test.ts` integration tests in this package).
 
 ## Status
 

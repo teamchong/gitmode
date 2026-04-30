@@ -169,7 +169,7 @@ Executed in phases so each step is reversible.
 
 ### Phase 3 — Extract reusable libraries
 - [x] Set up `packages/` workspace (pnpm workspace) — `pnpm-workspace.yaml`
-- [x] Copy WASM engine into `packages/wasm-git/` (7 smoke tests passing; full engine instantiation requires fresh `gitmode-core.wasm` rebuild — see package README for the gotcha)
+- [x] Copy WASM engine into `packages/wasm-git/` (17 tests passing — 7 smoke + 10 engine integration). `WasmEngine.create()` exercised end-to-end with SHA-1 fixtures (empty, "hello", 1MB), git-compatible blob hash for "hello\n" matches `git hash-object`, zlib deflate/inflate round-trips on small/repeated/incompressible data, heap doesn't grow unboundedly across 50 iterations (proves scratch ABI works). `WasmEngineCore` still requires a fresh `gitmode-core.wasm` rebuild — see package README.
 - [x] Copy compute pool + pack-worker into `packages/edge-compute-pool/` (15 smoke tests passing; depends on `@gitmode/wasm-git` via `workspace:*`)
 - [x] `packages/prompt-blame/` for Bet 1 code (already complete from Phase 2)
 - [x] Parent `vitest.config.ts` excludes `packages/**` so each package owns its bindings
