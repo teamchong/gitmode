@@ -360,6 +360,151 @@ async function fetchPackV2(opts: FetchPackOptions): Promise<FetchPackResult> {
   return demuxSidebandV2(responseBody);
 }
 
+// ============================================================
+// Push (git-receive-pack) — for writing back to the remote
+// ============================================================
+
+const ZERO_SHA = "0".repeat(40);
+
+export interface RefUpdate {
+  /** Full ref name, e.g. "refs/heads/main". */
+  refName: string;
+  /** The current sha at the remote (for optimistic concurrency). Use 40-zero for new refs. */
+  oldSha: string;
+  /** The sha to point this ref at after the push. Use 40-zero to delete. */
+  newSha: string;
+}
+
+export interface PushPackOptions extends SmartHttpOptions {
+  /** One entry per ref to update. */
+  refUpdates: RefUpdate[];
+  /** Pack body to upload — produced by `buildPackfile`. */
+  packData: Uint8Array;
+  /** Capabilities to advertise alongside the first ref update. */
+  capabilities?: string[];
+}
+
+export interface PushResult {
+  /** True if the server unpacked the packfile cleanly. */
+  unpackOk: boolean;
+  /** Server message if unpack failed. */
+  unpackError?: string;
+  /** Per-ref results. */
+  refResults: Array<{ ref: string; ok: boolean; error?: string }>;
+}
+
+/**
+ * Push a packfile + ref updates to a Git smart-HTTP remote via
+ * `git-receive-pack`.
+ *
+ * Wire format:
+ *   <pkt-line: "<oldSha> <newSha> <refName>\0<caps>\n">  (caps on first line only)
+ *   <pkt-line: "<oldSha> <newSha> <refName>\n">          (subsequent refs)
+ *   <flush>
+ *   <pack bytes>
+ *
+ * Response (pkt-lines):
+ *   "unpack ok\n"  or  "unpack <error>\n"
+ *   "ok <ref>\n"  or  "ng <ref> <reason>\n"  (one per ref)
+ *   <flush>
+ */
+export async function pushPack(opts: PushPackOptions): Promise<PushResult> {
+  const fetcher = opts.fetcher ?? globalThis.fetch;
+  if (opts.refUpdates.length === 0) {
+    throw new Error("pushPack: at least one refUpdate required");
+  }
+  for (const u of opts.refUpdates) {
+    if (!/^[0-9a-f]{40}$/.test(u.oldSha)) throw new Error(`pushPack: invalid oldSha: ${u.oldSha}`);
+    if (!/^[0-9a-f]{40}$/.test(u.newSha)) throw new Error(`pushPack: invalid newSha: ${u.newSha}`);
+    if (!u.refName.startsWith("refs/")) {
+      throw new Error(`pushPack: refName must start with refs/ (got ${u.refName})`);
+    }
+  }
+
+  const caps = opts.capabilities ?? [
+    "report-status",
+    "delete-refs",
+    "agent=gitmode-edge-compute",
+  ];
+
+  const updateLines: Uint8Array[] = [];
+  for (let i = 0; i < opts.refUpdates.length; i++) {
+    const u = opts.refUpdates[i]!;
+    const text =
+      i === 0
+        ? `${u.oldSha} ${u.newSha} ${u.refName}\0${caps.join(" ")}\n`
+        : `${u.oldSha} ${u.newSha} ${u.refName}\n`;
+    updateLines.push(encodePktLine(text));
+  }
+  updateLines.push(FLUSH_PKT);
+
+  const refsPart = concat(updateLines);
+  const body = new Uint8Array(refsPart.length + opts.packData.length);
+  body.set(refsPart, 0);
+  body.set(opts.packData, refsPart.length);
+
+  const url = `${opts.url.replace(/\/$/, "")}/git-receive-pack`;
+  const res = await fetcher(url, {
+    method: "POST",
+    headers: withAuth(
+      {
+        "Content-Type": "application/x-git-receive-pack-request",
+        Accept: "application/x-git-receive-pack-result",
+        ...(opts.headers ?? {}),
+      },
+      opts.token,
+    ),
+    body,
+  });
+
+  if (!res.ok) {
+    throw new Error(`git-receive-pack returned ${res.status} ${res.statusText}`);
+  }
+
+  return parsePushResponse(new Uint8Array(await res.arrayBuffer()));
+}
+
+function parsePushResponse(body: Uint8Array): PushResult {
+  const sections = parsePktLines(body);
+  let unpackOk = false;
+  let unpackError: string | undefined;
+  const refResults: Array<{ ref: string; ok: boolean; error?: string }> = [];
+
+  for (const section of sections) {
+    for (const raw of section) {
+      const text = decoder.decode(raw).replace(/\n$/, "");
+      // Sideband-wrapped status messages: skip channel byte if present.
+      // `report-status` typically isn't sidebanded but be defensive.
+      const stripped = text.length > 0 && text.charCodeAt(0) <= 0x03 ? text.slice(1) : text;
+
+      if (stripped.startsWith("unpack ")) {
+        const rest = stripped.slice("unpack ".length);
+        if (rest === "ok") unpackOk = true;
+        else unpackError = rest;
+        continue;
+      }
+      if (stripped.startsWith("ok ")) {
+        refResults.push({ ref: stripped.slice("ok ".length), ok: true });
+        continue;
+      }
+      if (stripped.startsWith("ng ")) {
+        const rest = stripped.slice("ng ".length);
+        const sp = rest.indexOf(" ");
+        if (sp === -1) {
+          refResults.push({ ref: rest, ok: false });
+        } else {
+          refResults.push({ ref: rest.slice(0, sp), ok: false, error: rest.slice(sp + 1) });
+        }
+      }
+    }
+  }
+
+  return { unpackOk, unpackError, refResults };
+}
+
+/** All-zero SHA — used to indicate "no current sha" (creating a ref) or "delete this ref". */
+export const NULL_SHA = ZERO_SHA;
+
 /**
  * V2 fetch response demux. The body starts with a `packfile\n` indicator line
  * (or potentially `acknowledgments\n` / `shallow-info\n` sections we skip),

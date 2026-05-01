@@ -119,9 +119,20 @@ Tune via env var or `PoolConfig.maxSlots`. The cap exists because each slot is a
 
 Below the threshold (200 objects for packfile, 10 for diff, 50 for grep) the local path is faster — you skip the RPC overhead.
 
-## Artifacts integration
+## Artifacts integration (read + write)
 
-Beyond the slot/coordinator surface, this package ships an end-to-end fetch path for [Cloudflare Artifacts](https://blog.cloudflare.com/artifacts-git-for-agents-beta/) (or any Git smart-HTTP v1 server):
+Beyond the slot/coordinator surface, this package ships **end-to-end read AND write** paths for [Cloudflare Artifacts](https://blog.cloudflare.com/artifacts-git-for-agents-beta/) (or any Git smart-HTTP server):
+
+| Primitive | Direction | Purpose |
+|---|---|---|
+| `fetchArtifactsCommit` | read | pull a commit's transitive closure into R2 |
+| `commitFileChange` | write | mutate one path, build commit, push back |
+| `applyTreeChange` | helper | build the new tree(s) for a single-path change |
+| `buildPackfile` / `buildCommitBytes` | helpers | produce raw git objects |
+| `pushPack` | wire | POST `git-receive-pack` with a packfile + ref updates |
+| `discoverArtifactsRefs` | wire | resolve branches/tags via smart-HTTP v1 or v2 |
+
+Read example:
 
 ```ts
 import { fetchArtifactsCommit, discoverArtifactsRefs } from "@gitmode/edge-compute-pool";
@@ -150,13 +161,49 @@ await fetchArtifactsCommit({
 await blameWalk({ startSha: headSha, filePath: "src/foo.ts", repoPath: "my-repo", lookup, pool: env.PACK_WORKER });
 ```
 
+Write example:
+
+```ts
+import { commitFileChange } from "@gitmode/edge-compute-pool";
+
+const result = await commitFileChange({
+  artifactsUrl: "https://x.artifacts.cloudflare.net/git/repo-1.git",
+  token: env.ARTIFACTS_TOKEN,
+  branch: "main",
+  pathParts: ["src", "config.json"],
+  newContent: new TextEncoder().encode(JSON.stringify({ updated: true })),
+  authorName: "Tester",
+  authorEmail: "tester@example.com",
+  message: "update config",
+  bucket: env.OBJECTS,
+  repoPath: "repo-1",
+  wasm,
+});
+// result.newCommitSha → the commit we just pushed
+// result.pushResult.unpackOk → true if the server accepted the pack
+```
+
 Implementation pieces (all in `src/protocol/`):
 
-- **`pkt-line.ts`** — Git's framing protocol: 4-hex-digit length prefix, flush/delim markers, sideband channel demultiplexing.
-- **`smart-http.ts`** — `discoverRefs` (GET info/refs) and `fetchPack` (POST git-upload-pack with want/done request body, sideband-64k response demux).
-- **`packfile-reader.ts`** — Pack v2 parser: SHA-1 trailer verification, type+size header decode, zlib inflate via WasmEngine, ref-delta and ofs-delta resolution.
+| File | Purpose |
+|---|---|
+| `pkt-line.ts` | Length-prefixed framing + flush/delim markers + sideband channel demux |
+| `smart-http.ts` | `discoverRefs` (v1+v2 auto-negotiation), `fetchPack` (v1 want/done or v2 command=fetch), `pushPack` (v1 receive-pack with status report) |
+| `packfile-reader.ts` | Pack v2 parser: SHA-1 trailer verification, type+size headers, zlib inflate via WasmEngine, ref-delta + ofs-delta resolution |
+| `packfile-writer.ts` | Inverse — serializes (type, content) tuples into a v2 pack with SHA-1 trailer |
+| `tree-bytes.ts` | Pure encode/parse of git tree objects + add/remove entry primitives |
+| `commit-bytes.ts` | Pure builder for git commit object bodies |
 
-The integration test (`test/artifacts-fetch.integration.test.ts`) stands up an in-memory Artifacts-shaped server, fetches a commit closure end-to-end, and verifies the staged objects are readable by `parse-commits` and `read-blobs`. No real Artifacts access required.
+Integration tests:
+
+- `test/artifacts-fetch.integration.test.ts` — read flow (in-memory Artifacts server → fetch closure → staged objects readable by pool actions).
+- `test/commit-file-change.integration.test.ts` — write flow (in-memory Artifacts server → push pack → server unpacks and validates objects, ref state updates).
+
+No real Artifacts access required for either.
+
+## S3-style example
+
+[`examples/artifacts-as-s3/`](./examples/artifacts-as-s3/) — a Worker that exposes any Artifacts repo as an S3-shaped REST API: `GET / PUT / DELETE / HEAD / list` with `?version=<sha>` time-travel. Drop-in for any client that speaks S3 idioms (`curl`, `rclone`, AWS SDKs).
 
 ## Limitations
 

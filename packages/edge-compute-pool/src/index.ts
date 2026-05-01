@@ -55,6 +55,41 @@ export {
   type FetchArtifactsCommitOptions,
   type FetchArtifactsCommitResult,
 } from "./coordinators/artifacts-fetch";
+export {
+  commitFileChange,
+  type CommitFileChangeOptions,
+  type CommitFileChangeResult,
+} from "./coordinators/commit-file-change";
+export {
+  applyTreeChange,
+  type ApplyChangeOptions,
+  type ApplyChangeResult,
+  type NewObject,
+  type TreeLoader,
+  type ObjectHasher,
+} from "./coordinators/tree-update";
+export {
+  buildPackfile,
+  type ObjectToPack,
+} from "./protocol/packfile-writer";
+export {
+  buildCommitBytes,
+  type BuildCommitOptions,
+} from "./protocol/commit-bytes";
+export {
+  parseTreeBytes,
+  encodeTreeBytes,
+  withEntry,
+  withoutEntry,
+  type TreeEntry,
+} from "./protocol/tree-bytes";
+export {
+  pushPack,
+  NULL_SHA,
+  type PushPackOptions,
+  type PushResult,
+  type RefUpdate,
+} from "./protocol/smart-http";
 // Protocol primitives — exported for callers that want to compose their own
 // fetch flows or inspect packfile contents directly.
 export {
