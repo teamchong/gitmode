@@ -201,10 +201,6 @@ Integration tests:
 
 No real Artifacts access required for either.
 
-## S3-style example
-
-[`examples/artifacts-as-s3/`](./examples/artifacts-as-s3/) — a Worker that exposes any Artifacts repo as an S3-shaped REST API: `GET / PUT / DELETE / HEAD / list` with `?version=<sha>` time-travel. Drop-in for any client that speaks S3 idioms (`curl`, `rclone`, AWS SDKs).
-
 ## Limitations
 
 - Unpack is **not** fan-out-able — delta chains require ordering within a packfile.
